@@ -1,0 +1,24 @@
+{
+  "id": "zeroqueries-local",
+  "name": "ZeroQueries Local",
+  "values": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000/api",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "auth_token",
+      "value": "",
+      "type": "secret",
+      "enabled": true
+    },
+    {
+      "key": "organization_id",
+      "value": "",
+      "type": "default",
+      "enabled": true
+    }
+  ]
+}

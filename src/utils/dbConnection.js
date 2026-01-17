@@ -1,0 +1,199 @@
+const { Client } = require('pg');
+const mysql = require('mysql2/promise');
+
+const testConnection = async (config) => {
+  const startTime = Date.now();
+  
+  try {
+    if (config.db_type === 'postgresql') {
+      const client = new Client({
+        host: config.host,
+        port: config.port,
+        database: config.database_name,
+        user: config.username,
+        password: config.password,
+        ssl: config.ssl_enabled ? { rejectUnauthorized: false } : false
+      });
+
+      await client.connect();
+      await client.query('SELECT 1');
+      await client.end();
+
+      const latency_ms = Date.now() - startTime;
+      return { success: true, latency_ms };
+    } else if (config.db_type === 'mysql') {
+      const connection = await mysql.createConnection({
+        host: config.host,
+        port: config.port,
+        database: config.database_name,
+        user: config.username,
+        password: config.password,
+        ssl: config.ssl_enabled ? { rejectUnauthorized: false } : undefined
+      });
+
+      await connection.query('SELECT 1');
+      await connection.end();
+
+      const latency_ms = Date.now() - startTime;
+      return { success: true, latency_ms };
+    } else {
+      throw new Error(`Unsupported database type: ${config.db_type}`);
+    }
+  } catch (error) {
+    const latency_ms = Date.now() - startTime;
+    return { 
+      success: false, 
+      error: error.message,
+      latency_ms 
+    };
+  }
+};
+
+const getSchema = async (connectionId, config) => {
+  try {
+    let tables = [];
+    let columns = [];
+
+    if (config.db_type === 'postgresql') {
+      const client = new Client({
+        host: config.host,
+        port: config.port,
+        database: config.database_name,
+        user: config.username,
+        password: config.password,
+        ssl: config.ssl_enabled ? { rejectUnauthorized: false } : false
+      });
+
+      await client.connect();
+
+      // Get tables
+      const tablesResult = await client.query(`
+        SELECT table_name, table_type 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public'
+        ORDER BY table_name
+      `);
+
+      tables = tablesResult.rows;
+
+      // Get columns for each table
+      for (const table of tables) {
+        const columnsResult = await client.query(`
+          SELECT 
+            column_name,
+            data_type,
+            is_nullable,
+            column_default
+          FROM information_schema.columns 
+          WHERE table_schema = 'public' 
+            AND table_name = $1
+          ORDER BY ordinal_position
+        `, [table.table_name]);
+
+        columns.push({
+          table_name: table.table_name,
+          columns: columnsResult.rows
+        });
+      }
+
+      await client.end();
+    } else if (config.db_type === 'mysql') {
+      const connection = await mysql.createConnection({
+        host: config.host,
+        port: config.port,
+        database: config.database_name,
+        user: config.username,
+        password: config.password,
+        ssl: config.ssl_enabled ? { rejectUnauthorized: false } : undefined
+      });
+
+      // Get tables
+      const [tablesResult] = await connection.query(`
+        SELECT TABLE_NAME as table_name, TABLE_TYPE as table_type
+        FROM information_schema.tables
+        WHERE table_schema = ?
+        ORDER BY TABLE_NAME
+      `, [config.database_name]);
+
+      tables = tablesResult;
+
+      // Get columns for each table
+      for (const table of tables) {
+        const [columnsResult] = await connection.query(`
+          SELECT 
+            COLUMN_NAME as column_name,
+            DATA_TYPE as data_type,
+            IS_NULLABLE as is_nullable,
+            COLUMN_DEFAULT as column_default
+          FROM information_schema.columns
+          WHERE table_schema = ? AND table_name = ?
+          ORDER BY ORDINAL_POSITION
+        `, [config.database_name, table.table_name]);
+
+        columns.push({
+          table_name: table.table_name,
+          columns: columnsResult
+        });
+      }
+
+      await connection.end();
+    }
+
+    // Store schema in database
+    const db = require('../config/database');
+    
+    for (const table of tables) {
+      // Create semantic table entry
+      const tableResult = await db.query(
+        `INSERT INTO semantic_tables (connection_id, table_name, business_name, is_enabled)
+         VALUES ($1, $2, $3, true)
+         ON CONFLICT (connection_id, table_name) 
+         DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+         RETURNING id`,
+        [connectionId, table.table_name, table.table_name]
+      );
+
+      const tableId = tableResult.rows[0].id;
+
+      // Get columns for this table
+      const tableColumns = columns.find(c => c.table_name === table.table_name)?.columns || [];
+      
+      for (const column of tableColumns) {
+        await db.query(
+          `INSERT INTO semantic_columns (
+            semantic_table_id, column_name, business_name, data_type, 
+            is_nullable, default_value, is_enabled
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, true)
+          ON CONFLICT (semantic_table_id, column_name) 
+          DO UPDATE SET 
+            data_type = $4,
+            is_nullable = $5,
+            default_value = $6,
+            updated_at = CURRENT_TIMESTAMP`,
+          [
+            tableId,
+            column.column_name,
+            column.column_name,
+            column.data_type,
+            column.is_nullable === 'YES',
+            column.column_default
+          ]
+        );
+      }
+    }
+
+    // Update last_synced_at
+    await db.query(
+      'UPDATE database_connections SET last_synced_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [connectionId]
+    );
+
+    return { success: true, tables, columns };
+  } catch (error) {
+    console.error('Get schema error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+module.exports = { testConnection, getSchema };
