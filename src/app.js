@@ -15,6 +15,7 @@ const queryRoutes = require('./routes/queries');
 const insightRoutes = require('./routes/insights');
 const billingRoutes = require('./routes/billing');
 const auditRoutes = require('./routes/audit');
+const roleRoutes = require('./routes/roles');
 
 const app = express();
 
@@ -40,7 +41,7 @@ app.use('/api/queries', queryRoutes);
 app.use('/api/insights', insightRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/audit', auditRoutes);
-
+app.use('/api/roles', roleRoutes);
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
