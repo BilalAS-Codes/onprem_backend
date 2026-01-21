@@ -7,11 +7,11 @@ const { auditLog } = require('../middleware/audit');
 // All billing routes require authentication
 router.use(authenticateToken);
 
-router.get('/billing/plan',
+router.get('/plan',
   billingController.getCurrentPlan
 );
 
-router.post('/billing/upgrade',
+router.post('/upgrade',
   auditLog('PLAN_UPGRADE', 'Billing'),
   billingController.upgradePlan
 );

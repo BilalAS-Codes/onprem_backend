@@ -51,7 +51,16 @@ const queryController = {
         'SELECT qh.*, u.full_name as user_name, d.name as department_name',
         'SELECT COUNT(*)'
       );
-      const countResult = await db.query(countQuery, params.slice(0, -2)); // Remove limit/offset params
+      // const countResult = await db.query(countQuery, params.slice(0, -2)); 
+ const countParams = [...params];
+
+// Remove limit & offset ONLY if they exist
+if (countParams.length >= 2) {
+  countParams.splice(-2, 2);
+}
+
+const countResult = await db.query(countQuery, countParams);
+// Remove limit/offset params
       const total = parseInt(countResult.rows[0].count);
 
       // Add ordering and pagination
