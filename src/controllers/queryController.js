@@ -3,11 +3,14 @@ const crypto = require('crypto');
 
 const queryController = {
   async getQueryHistory(req, res) {
+
+
     try {
       const organizationId = req.user.organization_id;
       const userId = req.user.id;
       const { limit = 50, offset = 0, department_id, status, search } = req.query;
 
+      console.log('Query params:', req.query);
       let query = `
         SELECT qh.*, u.full_name as user_name, d.name as department_name
         FROM query_history qh
@@ -46,20 +49,36 @@ const queryController = {
         paramCount++;
       }
 
-      // Get total count for pagination
-      const countQuery = query.replace(
-        'SELECT qh.*, u.full_name as user_name, d.name as department_name',
-        'SELECT COUNT(*)'
-      );
-      // const countResult = await db.query(countQuery, params.slice(0, -2)); 
- const countParams = [...params];
+//       // Get total count for pagination
+//       const countQuery = query.replace(
+//         'SELECT qh.*, u.full_name as user_name, d.name as department_name',
+//         'SELECT COUNT(*)'
+//       );
+//       // const countResult = await db.query(countQuery, params.slice(0, -2)); 
+//  const countParams = [...params];
 
-// Remove limit & offset ONLY if they exist
-if (countParams.length >= 2) {
-  countParams.splice(-2, 2);
-}
+// // Remove limit & offset ONLY if they exist
+// if (countParams.length >= 2) {
+//   countParams.splice(-2, 2);
+// }
+
+// Build COUNT query separately (FIX)
+const countQuery = `
+  SELECT COUNT(*)
+  FROM query_history qh
+  WHERE qh.organization_id = $1
+  ${req.user.role !== 'Admin' ? 'AND qh.user_id = $2' : ''}
+`;
+
+const countParams =
+  req.user.role !== 'Admin'
+    ? [organizationId, userId]
+    : [organizationId];
 
 const countResult = await db.query(countQuery, countParams);
+
+
+// const countResult = await db.query(countQuery, countParams);
 // Remove limit/offset params
       const total = parseInt(countResult.rows[0].count);
 
