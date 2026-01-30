@@ -16,6 +16,16 @@ router.get('/:connectionId/columns/:tableName',
   schemaController.getColumns
 );
 
+router.post('/:connectionId/debug-insert',
+  authorize([ROLES.ADMIN]),
+  schemaController.debugTableInsert
+);
+// NEW: Discover and seed schema endpoint (Admin only)
+router.post('/:connectionId/discover-seed',
+  authorize([ROLES.ADMIN]),
+  schemaController.discoverAndSeedSchema
+);
+
 // Mapping endpoints require Admin role
 router.post('/mapping/table',
   authorize([ROLES.ADMIN]),
