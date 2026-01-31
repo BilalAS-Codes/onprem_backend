@@ -1,1180 +1,1237 @@
 {
-	"info": {
-		"_postman_id": "39ee3d66-b00b-495f-9200-cfd8c82be920",
-		"name": "ZeroQueries API Collection",
-		"description": "Complete API collection for ZeroQueries B2B SaaS portal",
-		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-		"_exporter_id": "21835444"
-	},
-	"item": [
-		{
-			"name": "Authentication",
-			"item": [
-				{
-					"name": "Register Organization & Admin",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"organization_name\": \"Acme Corporation\",\n  \"domain\": \"acme.com\",\n  \"full_name\": \"John Doe\",\n  \"email\": \"admin@acme.com\",\n  \"password\": \"SecurePass123\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/auth/register",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"register"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Login User",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"email\": \"admin@acme.com\",\n  \"password\": \"SecurePass123\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/auth/login",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"login"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get User Profile",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/auth/profile",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"profile"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Change Password",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"currentPassword\": \"SecurePass123\",\n  \"newPassword\": \"NewSecurePass456\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/auth/change-password",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"auth",
-								"change-password"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "User authentication and registration APIs"
-		},
-		{
-			"name": "Organizations",
-			"item": [
-				{
-					"name": "Create Organization (Admin)",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"name\": \"Beta Corp\",\n  \"domain\": \"beta.com\",\n  \"plan_id\": \"{{starter_plan_id}}\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/organizations/create",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"organizations",
-								"create"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Organization Details",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/organizations",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"organizations"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Organization by ID",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/organizations/{{organization_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"organizations",
-								"{{organization_id}}"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Organization management APIs"
-		},
-		{
-			"name": "User Management",
-			"item": [
-				{
-					"name": "Invite New User",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"email\": \"finance.user@acme.com\",\n  \"full_name\": \"Jane Smith\",\n  \"role_id\": \"{{department_user_role_id}}\",\n  \"department_id\": \"{{finance_department_id}}\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/users/invite",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"users",
-								"invite"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get All Users",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/users",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"users"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update User Role",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"role_id\": \"{{viewer_role_id}}\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/users/{{user_id}}/role",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"users",
-								"{{user_id}}",
-								"role"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update User Department",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"department_id\": \"{{sales_department_id}}\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/users/{{user_id}}/department",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"users",
-								"{{user_id}}",
-								"department"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update User Status",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"status\": \"inactive\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/users/{{user_id}}/status",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"users",
-								"{{user_id}}",
-								"status"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "User invitation and management APIs (Admin only)"
-		},
-		{
-			"name": "Departments",
-			"item": [
-				{
-					"name": "Create Department",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"name\": \"Finance\",\n  \"privacy_level\": \"private\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/departments/create",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments",
-								"create"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get All Departments",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/departments",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update Department",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"name\": \"Finance & Accounting\",\n  \"privacy_level\": \"confidential\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/departments/{{department_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments",
-								"{{department_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Delete Department",
-					"request": {
-						"method": "DELETE",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/departments/{{department_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments",
-								"{{department_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Set Department Permissions",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"permissions\": [\n    {\n      \"table_name\": \"sales_data\",\n      \"access_level\": \"read_write\"\n    },\n    {\n      \"table_name\": \"customer_data\",\n      \"access_level\": \"read_only\"\n    }\n  ]\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/departments/{{department_id}}/permissions",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments",
-								"{{department_id}}",
-								"permissions"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Department Permissions",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/departments/{{department_id}}/permissions",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"departments",
-								"{{department_id}}",
-								"permissions"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Department management and permissions APIs"
-		},
-		{
-			"name": "Database Connections",
-			"item": [
-				{
-					"name": "Connect Database",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"db_type\": \"postgresql\",\n  \"host\": \"localhost\",\n  \"port\": 5432,\n  \"database_name\": \"sales_database\",\n  \"username\": \"readonly_user\",\n  \"password\": \"readonly_pass\",\n  \"ssl_enabled\": false\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/db/connect",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"db",
-								"connect"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get All Connections",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/db/connections",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"db",
-								"connections"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update Connection",
-					"request": {
-						"method": "PATCH",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"host\": \"new-db-host.acme.com\",\n  \"port\": 5433,\n  \"ssl_enabled\": true\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/db/{{connection_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"db",
-								"{{connection_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Test Connection",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{}"
-						},
-						"url": {
-							"raw": "{{base_url}}/db/{{connection_id}}/test",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"db",
-								"{{connection_id}}",
-								"test"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Database connection management APIs (Admin only)"
-		},
-		{
-			"name": "Schema & Mapping",
-			"item": [
-				{
-					"name": "Get Columns from Table",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/schema/{{connection_id}}/columns/sales",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"schema",
-								"{{connection_id}}",
-								"columns",
-								"sales"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Tables from Connection",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/schema/{{connection_id}}/tables",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"schema",
-								"{{connection_id}}",
-								"tables"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Create Table Mapping",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"connection_id\": \"{{connection_id}}\",\n  \"table_name\": \"sales_data\",\n  \"business_name\": \"Monthly Sales Report\",\n  \"is_enabled\": true\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/schema/mapping/table",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"schema",
-								"mapping",
-								"table"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Create Column Mapping",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"semantic_table_id\": \"{{semantic_table_id}}\",\n  \"column_name\": \"amount\",\n  \"business_name\": \"Sale Amount\",\n  \"data_type\": \"numeric\",\n  \"is_nullable\": false,\n  \"default_value\": \"0\",\n  \"department_access\": \"Finance,Sales\",\n  \"is_enabled\": true\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/schema/mapping/column",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"schema",
-								"mapping",
-								"column"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Schema discovery and business mapping APIs"
-		},
-		{
-			"name": "Query History",
-			"item": [
-				{
-					"name": "Get Query History",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/queries/history",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"queries",
-								"history"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Query by ID",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/queries/{{query_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"queries",
-								"{{query_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Delete Query",
-					"request": {
-						"method": "DELETE",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/queries/{{query_id}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"queries",
-								"{{query_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Share Query",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{}"
-						},
-						"url": {
-							"raw": "{{base_url}}/queries/{{query_id}}/share",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"queries",
-								"{{query_id}}",
-								"share"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Query history and management APIs"
-		},
-		{
-			"name": "Shared Insights",
-			"item": [
-				{
-					"name": "Get Shared Insight",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/insights/shared/{{share_token}}",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"insights",
-								"shared",
-								"{{share_token}}"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Public shared insights APIs"
-		},
-		{
-			"name": "Billing & Plans",
-			"item": [
-				{
-					"name": "Get Current Plan_old",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/billing/plan",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"billing",
-								"plan"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Current Plan",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/billing/plan",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"billing",
-								"plan"
-							]
-						},
-						"description": "Get current plan details for authenticated organization"
-					},
-					"response": []
-				},
-				{
-					"name": "Upgrade Plan",
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							},
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"plan_id\": \"{{growth_plan_id}}\"\n}"
-						},
-						"url": {
-							"raw": "{{base_url}}/billing/upgrade",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"billing",
-								"upgrade"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Billing and plan management APIs"
-		},
-		{
-			"name": "Audit Logs",
-			"item": [
-				{
-					"name": "Get Audit Logs",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{auth_token}}"
-							}
-						],
-						"url": {
-							"raw": "{{base_url}}/audit/logs",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"audit",
-								"logs"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "Audit log viewing APIs (Admin only)"
-		},
-		{
-			"name": "Health Check",
-			"item": [
-				{
-					"name": "Health Check",
-					"request": {
-						"method": "GET",
-						"header": [],
-						"url": {
-							"raw": "{{base_url}}/health",
-							"host": [
-								"{{base_url}}"
-							],
-							"path": [
-								"health"
-							]
-						}
-					},
-					"response": []
-				}
-			],
-			"description": "System health check endpoint"
-		}
-	],
-	"event": [
-		{
-			"listen": "prerequest",
-			"script": {
-				"type": "text/javascript",
-				"exec": [
-					"// Pre-request script example",
-					"console.log('Making request to: ' + pm.request.url);"
-				]
-			}
-		},
-		{
-			"listen": "test",
-			"script": {
-				"type": "text/javascript",
-				"exec": [
-					"// Test script example",
-					"pm.test(\"Status code is 200\", function () {",
-					"    pm.response.to.have.status(200);",
-					"});",
-					"",
-					"// For successful responses",
-					"pm.test(\"Response has success property\", function () {",
-					"    var jsonData = pm.response.json();",
-					"    pm.expect(jsonData.success).to.eql(true);",
-					"});",
-					"",
-					"// Store auth token from login response",
-					"if (pm.request.name === \"Login User\" && pm.response.code === 200) {",
-					"    var jsonData = pm.response.json();",
-					"    pm.collectionVariables.set(\"auth_token\", jsonData.token);",
-					"    pm.collectionVariables.set(\"organization_id\", jsonData.user.organization_id);",
-					"    pm.collectionVariables.set(\"user_id\", jsonData.user.id);",
-					"}",
-					"",
-					"// Store department ID from creation response",
-					"if (pm.request.name === \"Create Department\" && pm.response.code === 201) {",
-					"    var jsonData = pm.response.json();",
-					"    pm.collectionVariables.set(\"department_id\", jsonData.department.id);",
-					"}"
-				]
-			}
-		}
-	],
-	"variable": [
-		{
-			"key": "base_url",
-			"value": "http://localhost:3000/api",
-			"type": "string"
-		},
-		{
-			"key": "auth_token",
-			"value": "",
-			"type": "string",
-			"description": "JWT token from login response"
-		},
-		{
-			"key": "organization_id",
-			"value": "",
-			"type": "string",
-			"description": "Organization ID from registration/login"
-		},
-		{
-			"key": "user_id",
-			"value": "",
-			"type": "string",
-			"description": "User ID from user list or profile"
-		},
-		{
-			"key": "department_id",
-			"value": "",
-			"type": "string",
-			"description": "Department ID from department creation"
-		},
-		{
-			"key": "connection_id",
-			"value": "",
-			"type": "string",
-			"description": "Database connection ID"
-		},
-		{
-			"key": "semantic_table_id",
-			"value": "",
-			"type": "string",
-			"description": "Semantic table ID from mapping"
-		},
-		{
-			"key": "query_id",
-			"value": "",
-			"type": "string",
-			"description": "Query history ID"
-		},
-		{
-			"key": "share_token",
-			"value": "",
-			"type": "string",
-			"description": "Share token from query sharing"
-		},
-		{
-			"key": "starter_plan_id",
-			"value": "",
-			"type": "string",
-			"description": "Starter plan ID (get from database)"
-		},
-		{
-			"key": "growth_plan_id",
-			"value": "",
-			"type": "string",
-			"description": "Growth plan ID (get from database)"
-		},
-		{
-			"key": "department_user_role_id",
-			"value": "",
-			"type": "string",
-			"description": "Department User role ID (get from database)"
-		},
-		{
-			"key": "viewer_role_id",
-			"value": "",
-			"type": "string",
-			"description": "Viewer role ID (get from database)"
-		},
-		{
-			"key": "finance_department_id",
-			"value": "",
-			"type": "string",
-			"description": "Finance department ID"
-		},
-		{
-			"key": "sales_department_id",
-			"value": "",
-			"type": "string",
-			"description": "Sales department ID"
-		}
-	]
+  "info": {
+    "_postman_id": "39ee3d66-b00b-495f-9200-cfd8c82be920",
+    "name": "ZeroQueries API Collection",
+    "description": "Complete API collection for ZeroQueries B2B SaaS portal",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "21835444"
+  },
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register Organization & Admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"organization_name\": \"Acme Corporation\",\n  \"domain\": \"acme.com\",\n  \"full_name\": \"John Doe\",\n  \"email\": \"admin@acme.com\",\n  \"password\": \"SecurePass123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@acme.com\",\n  \"password\": \"SecurePass123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/profile",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "profile"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"currentPassword\": \"SecurePass123\",\n  \"newPassword\": \"NewSecurePass456\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/change-password",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "change-password"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "User authentication and registration APIs"
+    },
+    {
+      "name": "Organizations",
+      "item": [
+        {
+          "name": "Create Organization (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Beta Corp\",\n  \"domain\": \"beta.com\",\n  \"plan_id\": \"{{starter_plan_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/organizations/create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "organizations",
+                "create"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Organization Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/organizations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "organizations"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Organization by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/organizations/{{organization_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "organizations",
+                "{{organization_id}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Organization management APIs"
+    },
+    {
+      "name": "User Management",
+      "item": [
+        {
+          "name": "Invite New User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"finance.user@acme.com\",\n  \"full_name\": \"Jane Smith\",\n  \"role_id\": \"{{department_user_role_id}}\",\n  \"department_id\": \"{{finance_department_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/invite",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "invite"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Users",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update User Role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role_id\": \"{{viewer_role_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/role",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "role"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update User Department",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"department_id\": \"{{sales_department_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/department",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "department"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update User Status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"inactive\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/users/{{user_id}}/status",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "users",
+                "{{user_id}}",
+                "status"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "User invitation and management APIs (Admin only)"
+    },
+    {
+      "name": "Departments",
+      "item": [
+        {
+          "name": "Create Department",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finance\",\n  \"privacy_level\": \"private\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/departments/create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments",
+                "create"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Departments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/departments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Department",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Finance & Accounting\",\n  \"privacy_level\": \"confidential\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/departments/{{department_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments",
+                "{{department_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Department",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/departments/{{department_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments",
+                "{{department_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Set Department Permissions",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"permissions\": [\n    {\n      \"table_name\": \"sales_data\",\n      \"access_level\": \"read_write\"\n    },\n    {\n      \"table_name\": \"customer_data\",\n      \"access_level\": \"read_only\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/departments/{{department_id}}/permissions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments",
+                "{{department_id}}",
+                "permissions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Department Permissions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/departments/{{department_id}}/permissions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "departments",
+                "{{department_id}}",
+                "permissions"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Department management and permissions APIs"
+    },
+    {
+      "name": "Database Connections",
+      "item": [
+        {
+          "name": "Connect Database",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"db_type\": \"postgresql\",\n  \"host\": \"localhost\",\n  \"port\": 5432,\n  \"database_name\": \"sales_database\",\n  \"username\": \"readonly_user\",\n  \"password\": \"readonly_pass\",\n  \"ssl_enabled\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/db/connect",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "db",
+                "connect"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Connections",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/db/connections",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "db",
+                "connections"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Connection",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"host\": \"new-db-host.acme.com\",\n  \"port\": 5433,\n  \"ssl_enabled\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/db/{{connection_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "db",
+                "{{connection_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Test Connection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{base_url}}/db/{{connection_id}}/test",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "db",
+                "{{connection_id}}",
+                "test"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Database connection management APIs (Admin only)"
+    },
+    {
+      "name": "Schema & Mapping",
+      "item": [
+        {
+          "name": "Get Schema From ConnectionId",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/schema/{{connectionId}}/discover-seed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "{{connectionId}}",
+                "discover-seed"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Tables from Connection",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/schema/{{connection_id}}/tables",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "{{connection_id}}",
+                "tables"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Columns from Table",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/schema/{{connection_id}}/columns/sales",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "{{connection_id}}",
+                "columns",
+                "sales"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Table Mapping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"connection_id\": \"{{connection_id}}\",\n  \"table_name\": \"sales_data\",\n  \"business_name\": \"Monthly Sales Report\",\n  \"is_enabled\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/schema/mapping/table",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "mapping",
+                "table"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Column Mapping",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"semantic_table_id\": \"{{semantic_table_id}}\",\n  \"column_name\": \"amount\",\n  \"business_name\": \"Sale Amount\",\n  \"data_type\": \"numeric\",\n  \"is_nullable\": false,\n  \"default_value\": \"0\",\n  \"department_access\": \"Finance,Sales\",\n  \"is_enabled\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/schema/mapping/column",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "mapping",
+                "column"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Bulk Column Mapping",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"semantic_table_id\": \"32a0c2ec-a0e3-4347-bac0-e6f421a15f74\",\n  \"columns\": [\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    },\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"data_type\": \"character varying\",\n      \"is_nullable\": true,\n      \"default_value\": null,\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    },\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"data_type\": \"character varying\",\n      \"is_nullable\": true,\n      \"default_value\": null,\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    }\n  ]}"
+            },
+            "url": {
+              "raw": "{{base_url}}/schema/mapping/columns/bulk",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "mapping",
+                "columns",
+                "bulk"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Schema discovery and business mapping APIs"
+    },
+    {
+      "name": "Query History",
+      "item": [
+        {
+          "name": "Get Query History",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/queries/history",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "queries",
+                "history"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Query by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/queries/{{query_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "queries",
+                "{{query_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Query",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/queries/{{query_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "queries",
+                "{{query_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Share Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{base_url}}/queries/{{query_id}}/share",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "queries",
+                "{{query_id}}",
+                "share"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Query history and management APIs"
+    },
+    {
+      "name": "Shared Insights",
+      "item": [
+        {
+          "name": "Get Shared Insight",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/insights/shared/{{share_token}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "insights",
+                "shared",
+                "{{share_token}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Public shared insights APIs"
+    },
+    {
+      "name": "Billing & Plans",
+      "item": [
+        {
+          "name": "Get Current Plan_old",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/billing/plan",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "billing",
+                "plan"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Current Plan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/billing/plan",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "billing",
+                "plan"
+              ]
+            },
+            "description": "Get current plan details for authenticated organization"
+          },
+          "response": []
+        },
+        {
+          "name": "Upgrade Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"plan_id\": \"{{growth_plan_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/billing/upgrade",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "billing",
+                "upgrade"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Billing and plan management APIs"
+    },
+    {
+      "name": "Audit Logs",
+      "item": [
+        {
+          "name": "Get Audit Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/audit/logs",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "audit",
+                "logs"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "Audit log viewing APIs (Admin only)"
+    },
+    {
+      "name": "Health Check",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ],
+      "description": "System health check endpoint"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Pre-request script example",
+          "console.log('Making request to: ' + pm.request.url);"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Test script example",
+          "pm.test(\"Status code is 200\", function () {",
+          "    pm.response.to.have.status(200);",
+          "});",
+          "",
+          "// For successful responses",
+          "pm.test(\"Response has success property\", function () {",
+          "    var jsonData = pm.response.json();",
+          "    pm.expect(jsonData.success).to.eql(true);",
+          "});",
+          "",
+          "// Store auth token from login response",
+          "if (pm.request.name === \"Login User\" && pm.response.code === 200) {",
+          "    var jsonData = pm.response.json();",
+          "    pm.collectionVariables.set(\"auth_token\", jsonData.token);",
+          "    pm.collectionVariables.set(\"organization_id\", jsonData.user.organization_id);",
+          "    pm.collectionVariables.set(\"user_id\", jsonData.user.id);",
+          "}",
+          "",
+          "// Store department ID from creation response",
+          "if (pm.request.name === \"Create Department\" && pm.response.code === 201) {",
+          "    var jsonData = pm.response.json();",
+          "    pm.collectionVariables.set(\"department_id\", jsonData.department.id);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000/api",
+      "type": "string"
+    },
+    {
+      "key": "auth_token",
+      "value": "",
+      "type": "string",
+      "description": "JWT token from login response"
+    },
+    {
+      "key": "organization_id",
+      "value": "",
+      "type": "string",
+      "description": "Organization ID from registration/login"
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string",
+      "description": "User ID from user list or profile"
+    },
+    {
+      "key": "department_id",
+      "value": "",
+      "type": "string",
+      "description": "Department ID from department creation"
+    },
+    {
+      "key": "connection_id",
+      "value": "",
+      "type": "string",
+      "description": "Database connection ID"
+    },
+    {
+      "key": "semantic_table_id",
+      "value": "",
+      "type": "string",
+      "description": "Semantic table ID from mapping"
+    },
+    {
+      "key": "query_id",
+      "value": "",
+      "type": "string",
+      "description": "Query history ID"
+    },
+    {
+      "key": "share_token",
+      "value": "",
+      "type": "string",
+      "description": "Share token from query sharing"
+    },
+    {
+      "key": "starter_plan_id",
+      "value": "",
+      "type": "string",
+      "description": "Starter plan ID (get from database)"
+    },
+    {
+      "key": "growth_plan_id",
+      "value": "",
+      "type": "string",
+      "description": "Growth plan ID (get from database)"
+    },
+    {
+      "key": "department_user_role_id",
+      "value": "",
+      "type": "string",
+      "description": "Department User role ID (get from database)"
+    },
+    {
+      "key": "viewer_role_id",
+      "value": "",
+      "type": "string",
+      "description": "Viewer role ID (get from database)"
+    },
+    {
+      "key": "finance_department_id",
+      "value": "",
+      "type": "string",
+      "description": "Finance department ID"
+    },
+    {
+      "key": "sales_department_id",
+      "value": "",
+      "type": "string",
+      "description": "Sales department ID"
+    }
+  ]
 }
