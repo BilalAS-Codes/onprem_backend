@@ -38,13 +38,12 @@ const schemaController = {
     res.status(500).json({ error: 'Failed to fetch tables' });
   }
 },
-
   async getColumns(req, res) {
   try {
     const { connectionId, tableName } = req.params;
     const organizationId = req.user.organization_id;
-
-    // Verify connection belongs to organization
+    
+    // Verify connection
     const connectionCheck = await db.query(
       'SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2',
       [connectionId, organizationId]
@@ -54,14 +53,30 @@ const schemaController = {
       return res.status(404).json({ error: 'Database connection not found' });
     }
 
-    // Get columns from YOUR semantic_columns table
+    // Get semantic_table_id first
+    const tableResult = await db.query(
+      `SELECT id FROM semantic_tables 
+       WHERE connection_id = $1 AND TRIM(table_name) = TRIM($2)`,
+      [connectionId, tableName]
+    );
+
+    if (tableResult.rows.length === 0) {
+      return res.status(404).json({ 
+        error: 'Table not found',
+        details: { connectionId, tableName }
+      });
+    }
+
+    const semanticTableId = tableResult.rows[0].id;
+
+    // Query columns directly using semantic_table_id
     const result = await db.query(
       `SELECT sc.*, st.table_name
        FROM semantic_columns sc
        JOIN semantic_tables st ON sc.semantic_table_id = st.id
-       WHERE st.connection_id = $1 AND st.table_name = $2
+       WHERE sc.semantic_table_id = $1
        ORDER BY sc.column_name`,
-      [connectionId, tableName]
+      [semanticTableId]
     );
 
     res.json({
@@ -70,9 +85,12 @@ const schemaController = {
     });
   } catch (error) {
     console.error('Get columns error:', error);
-    res.status(500).json({ error: 'Failed to fetch columns' });
+    res.status(500).json({ 
+      error: 'Failed to fetch columns',
+      details: error.message 
+    });
   }
-},
+  },
 
   async createTableMapping(req, res) {
     try {
