@@ -20,6 +20,12 @@ router.post('/:connectionId/debug-insert',
   authorize([ROLES.ADMIN]),
   schemaController.debugTableInsert
 );
+
+// Bulk column mapping updates (Admin only)
+router.put('/mapping/columns/bulk',
+  authorize([ROLES.ADMIN]),
+  schemaController.bulkUpdateColumnMappings
+);
 // NEW: Discover and seed schema endpoint (Admin only)
 router.post('/:connectionId/discover-seed',
   authorize([ROLES.ADMIN]),

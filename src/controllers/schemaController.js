@@ -513,6 +513,111 @@ async debugTableInsert(req, res) {
     });
   }
 },
+
+async bulkUpdateColumnMappings(req, res) {
+  try {
+    const { semantic_table_id, columns } = req.body;
+    const organizationId = req.user.organization_id;
+
+    // Validate request body
+    if (!semantic_table_id || !Array.isArray(columns) || columns.length === 0) {
+      return res.status(400).json({ 
+        error: 'semantic_table_id and columns array are required' 
+      });
+    }
+
+    // Verify table belongs to organization
+    const tableCheck = await db.query(
+      `SELECT st.id 
+       FROM semantic_tables st
+       JOIN database_connections dc ON st.connection_id = dc.id
+       WHERE st.id = $1 AND dc.organization_id = $2`,
+      [semantic_table_id, organizationId]
+    );
+
+    if (!tableCheck.rows[0]) {
+      return res.status(404).json({ error: 'Table not found or unauthorized' });
+    }
+
+    const results = [];
+    const errors = [];
+
+    // Process each column update
+    for (const column of columns) {
+      try {
+        const {
+          column_name,
+          business_name,
+          data_type,
+          is_nullable,
+          default_value,
+          department_access = 'all',
+          is_enabled = true
+        } = column;
+
+        // Validate required fields
+        if (!column_name) {
+          errors.push({ 
+            column: column, 
+            error: 'column_name is required' 
+          });
+          continue;
+        }
+
+        const result = await db.query(
+          `INSERT INTO semantic_columns (
+            semantic_table_id, column_name, business_name, data_type,
+            is_nullable, default_value, department_access, is_enabled
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          ON CONFLICT (semantic_table_id, column_name) 
+          DO UPDATE SET 
+            business_name = COALESCE(EXCLUDED.business_name, semantic_columns.business_name),
+            data_type = COALESCE(EXCLUDED.data_type, semantic_columns.data_type),
+            is_nullable = COALESCE(EXCLUDED.is_nullable, semantic_columns.is_nullable),
+            default_value = COALESCE(EXCLUDED.default_value, semantic_columns.default_value),
+            department_access = COALESCE(EXCLUDED.department_access, semantic_columns.department_access),
+            is_enabled = COALESCE(EXCLUDED.is_enabled, semantic_columns.is_enabled),
+            updated_at = CURRENT_TIMESTAMP
+          RETURNING *`,
+          [
+            semantic_table_id, 
+            column_name, 
+            business_name || column_name,
+            data_type || 'varchar',
+            is_nullable !== undefined ? is_nullable : true,
+            default_value,
+            department_access,
+            is_enabled
+          ]
+        );
+
+        results.push(result.rows[0]);
+      } catch (columnError) {
+        errors.push({ 
+          column: column, 
+          error: columnError.message 
+        });
+        console.error(`Error updating column ${column.column_name}:`, columnError);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Updated ${results.length} columns successfully`,
+      updated: results.length,
+      failed: errors.length,
+      columns: results,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('Bulk update column mappings error:', error);
+    res.status(500).json({ 
+      error: 'Failed to bulk update column mappings',
+      details: error.message 
+    });
+  }
+},
   async getMappedColumns(req, res) {
     try {
       const organizationId = req.user.organization_id;
