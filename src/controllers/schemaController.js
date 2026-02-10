@@ -209,6 +209,37 @@ const schemaController = {
     }
   },
 
+  async deleteConnection(req, res) {
+  try {
+    const { connectionId } = req.params;
+    const organizationId = req.user.organization_id;
+
+    // Delete connection (will cascade to semantic_tables and semantic_columns)
+    const result = await db.query(
+      `DELETE FROM database_connections 
+       WHERE id = $1 AND organization_id = $2
+       RETURNING *`,
+      [connectionId, organizationId]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Connection deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Delete connection error:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete connection',
+      details: error.message
+    });
+  }
+},
+
 async discoverAndSeedSchema(req, res) {
   try {
     const { connectionId } = req.params;
