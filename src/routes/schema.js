@@ -31,6 +31,11 @@ router.post('/:connectionId/discover-seed',
   authorize([ROLES.ADMIN]),
   schemaController.discoverAndSeedSchema
 );
+// In your schema routes
+router.delete('/:connectionId',
+  authorize([ROLES.ADMIN]),
+  schemaController.deleteConnection
+);
 
 // Mapping endpoints require Admin role
 router.post('/mapping/table',

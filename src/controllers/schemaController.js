@@ -6,6 +6,11 @@ const schemaController = {
     const { connectionId } = req.params;
     const organizationId = req.user.organization_id;
 
+    // Validate connectionId is a valid UUID format
+    if (!connectionId || typeof connectionId !== 'string' || connectionId === 'null') {
+      return res.status(400).json({ error: 'Invalid connection ID' });
+    }
+
     // Verify connection belongs to organization
     const connectionCheck = await db.query(
       'SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2',
@@ -38,13 +43,12 @@ const schemaController = {
     res.status(500).json({ error: 'Failed to fetch tables' });
   }
 },
-
   async getColumns(req, res) {
   try {
     const { connectionId, tableName } = req.params;
     const organizationId = req.user.organization_id;
 
-    // Verify connection belongs to organization
+    // Verify connection
     const connectionCheck = await db.query(
       'SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2',
       [connectionId, organizationId]
@@ -54,14 +58,30 @@ const schemaController = {
       return res.status(404).json({ error: 'Database connection not found' });
     }
 
-    // Get columns from YOUR semantic_columns table
+    // Get semantic_table_id first
+    const tableResult = await db.query(
+      `SELECT id FROM semantic_tables 
+       WHERE connection_id = $1 AND TRIM(table_name) = TRIM($2)`,
+      [connectionId, tableName]
+    );
+
+    if (tableResult.rows.length === 0) {
+      return res.status(404).json({ 
+        error: 'Table not found',
+        details: { connectionId, tableName }
+      });
+    }
+
+    const semanticTableId = tableResult.rows[0].id;
+
+    // Query columns directly using semantic_table_id
     const result = await db.query(
       `SELECT sc.*, st.table_name
        FROM semantic_columns sc
        JOIN semantic_tables st ON sc.semantic_table_id = st.id
-       WHERE st.connection_id = $1 AND st.table_name = $2
+       WHERE sc.semantic_table_id = $1
        ORDER BY sc.column_name`,
-      [connectionId, tableName]
+      [semanticTableId]
     );
 
     res.json({
@@ -70,9 +90,12 @@ const schemaController = {
     });
   } catch (error) {
     console.error('Get columns error:', error);
-    res.status(500).json({ error: 'Failed to fetch columns' });
+    res.status(500).json({ 
+      error: 'Failed to fetch columns',
+      details: error.message 
+    });
   }
-},
+  },
 
   async createTableMapping(req, res) {
     try {
@@ -191,6 +214,37 @@ const schemaController = {
     }
   },
 
+  async deleteConnection(req, res) {
+  try {
+    const { connectionId } = req.params;
+    const organizationId = req.user.organization_id;
+
+    // Delete connection (will cascade to semantic_tables and semantic_columns)
+    const result = await db.query(
+      `DELETE FROM database_connections 
+       WHERE id = $1 AND organization_id = $2
+       RETURNING *`,
+      [connectionId, organizationId]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Connection deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Delete connection error:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete connection',
+      details: error.message
+    });
+  }
+},
+
 async discoverAndSeedSchema(req, res) {
   try {
     const { connectionId } = req.params;
@@ -215,22 +269,22 @@ async discoverAndSeedSchema(req, res) {
     }
 
     const dbConfig = connectionResult.rows[0];
-    
+
     // Import the discoverer
     const dbDiscoverer = require('../helpers/dbDiscoverer');
-    
+
     // Connect to the external database (RDS)
     const pool = await dbDiscoverer.getConnectionPool(dbConfig);
-    
+
     // Discover all tables from external database
     const tables = await dbDiscoverer.discoverTables(pool, dbConfig.db_type);
-    
+
     console.log(`Discovered ${tables.length} tables`);
-    
+
     let seededTables = [];
     let seededColumns = [];
     let errors = [];
-    
+
     // First, let's clear existing data if override is true
     if (override_existing) {
       try {
@@ -240,29 +294,29 @@ async discoverAndSeedSchema(req, res) {
           )`,
           [connectionId]
         );
-        
+
         await db.query(
           `DELETE FROM semantic_tables WHERE connection_id = $1`,
           [connectionId]
         );
-        
+
         console.log(`Cleared existing data for connection: ${connectionId}`);
       } catch (clearError) {
         console.error('Error clearing existing data:', clearError.message);
       }
     }
-    
+
     // Seed tables into YOUR semantic_tables table
     if (seed_tables) {
       for (const table of tables) {
         try {
           // Ensure table_name is a string
           const tableName = String(table.table_name || '').trim();
-          
+
           console.log(`Processing table: "${tableName}"`);
-          
+
           let result;
-          
+
           // Use explicit type casting in the query
           if (override_existing) {
             // Use DO NOTHING on conflict since we already cleared data
@@ -299,11 +353,11 @@ async discoverAndSeedSchema(req, res) {
               ]
             );
           }
-          
+
           if (result.rows[0]) {
             const tableRecord = result.rows[0];
             seededTables.push(tableRecord);
-            
+
             // Discover and seed columns for this table if requested
             if (seed_columns) {
               const tableId = tableRecord.id;
@@ -312,9 +366,9 @@ async discoverAndSeedSchema(req, res) {
                 dbConfig.db_type, 
                 tableName
               );
-              
+
               console.log(`Discovered ${columns.length} columns for table: ${tableName}`);
-              
+
               for (const column of columns) {
                 try {
                   // Ensure column values are properly typed
@@ -324,9 +378,9 @@ async discoverAndSeedSchema(req, res) {
                   const defaultValue = column.default_value !== null && 
                                       column.default_value !== undefined ? 
                     String(column.default_value) : null;
-                  
+
                   let columnResult;
-                  
+
                   if (override_existing) {
                     // Upsert column
                     columnResult = await db.query(
@@ -376,7 +430,7 @@ async discoverAndSeedSchema(req, res) {
                       ]
                     );
                   }
-                  
+
                   if (columnResult.rows[0]) {
                     seededColumns.push(columnResult.rows[0]);
                   }
@@ -399,10 +453,10 @@ async discoverAndSeedSchema(req, res) {
         }
       }
     }
-    
+
     // Release the connection pool to external database
     await pool.end();
-    
+
     res.status(200).json({
       success: true,
       message: 'Schema discovery and seeding completed',
@@ -421,7 +475,7 @@ async discoverAndSeedSchema(req, res) {
       tables: seededTables,
       columns: seededColumns
     });
-    
+
   } catch (error) {
     console.error('Discover and seed schema error:', error);
     res.status(500).json({ 
@@ -452,7 +506,7 @@ async debugTableInsert(req, res) {
     }
 
     const dbConfig = connectionResult.rows[0];
-    
+
     // Test 1: Try simple insert without ON CONFLICT
     const test1 = await db.query(
       `INSERT INTO semantic_tables (connection_id, table_name, business_name, is_enabled)
@@ -460,7 +514,7 @@ async debugTableInsert(req, res) {
        RETURNING *`,
       [connectionId, table_name, table_name]
     ).catch(err => ({ error: err.message }));
-    
+
     // Test 2: Try with explicit type casting
     const test2 = await db.query(
       `INSERT INTO semantic_tables (connection_id, table_name, business_name, is_enabled)
@@ -468,7 +522,7 @@ async debugTableInsert(req, res) {
        RETURNING *`,
       [connectionId, table_name, table_name]
     ).catch(err => ({ error: err.message }));
-    
+
     // Test 3: Check if table already exists
     const existingCheck = await db.query(
       `SELECT id, table_name, pg_typeof(table_name) as table_name_type 
@@ -476,7 +530,7 @@ async debugTableInsert(req, res) {
        WHERE connection_id = $1 AND table_name = $2`,
       [connectionId, table_name]
     );
-    
+
     // Test 4: Try with different table name
     const testTableName = 'test_table_' + Date.now();
     const test4 = await db.query(
@@ -503,7 +557,7 @@ async debugTableInsert(req, res) {
         table_name_type: typeof table_name
       }
     });
-    
+
   } catch (error) {
     console.error('Debug table insert error:', error);
     res.status(500).json({ 
@@ -652,7 +706,4 @@ async bulkUpdateColumnMappings(req, res) {
     }
   }
 };
-
-
-
 module.exports = schemaController;
