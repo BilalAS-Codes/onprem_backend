@@ -11,9 +11,15 @@ router.get('/plan',
   billingController.getCurrentPlan
 );
 
-router.post('/upgrade',
-  auditLog('PLAN_UPGRADE', 'Billing'),
-  billingController.upgradePlan
+router.post(
+  '/create-order',
+  authenticateToken,
+  billingController.createRazorpayOrder
+);
+
+router.post(
+  '/verify-payment',
+  billingController.verifyRazorpayPayment
 );
 
 module.exports = router;

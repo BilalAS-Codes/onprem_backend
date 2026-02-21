@@ -88,6 +88,20 @@ const User = {
     const result = await db.query(query, params);
     return result.rows;
   },
+    async setOTP(userId, otpHash, expiresAt) {
+    await db.query(
+      'UPDATE users SET otp_hash = $1, otp_expires_at = $2 WHERE id = $3',
+      [otpHash, expiresAt, userId]
+    );
+  },
+
+  async clearOTP(userId) {
+    await db.query(
+      'UPDATE users SET otp_hash = NULL, otp_expires_at = NULL WHERE id = $1',
+      [userId]
+    );
+  }
+  ,
 
   async verifyPassword(password, passwordHash) {
     return await bcrypt.compare(password, passwordHash);

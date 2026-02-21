@@ -29,6 +29,7 @@ const databaseController = {
 
       if (!testResult.success) {
         return res.status(400).json({
+          success: false,
           error: 'Connection failed',
           details: testResult.error
         });
@@ -72,129 +73,256 @@ const databaseController = {
       });
     } catch (error) {
       console.error('Database connection error:', error);
-      res.status(500).json({ error: 'Failed to create database connection' });
-    }
-  },
-
-  async getConnections(req, res) {
-    try {
-      const organizationId = req.user.organization_id;
-      const connections = await DatabaseConnection.findByOrganization(organizationId);
-      
-      // Remove sensitive data
-      const safeConnections = connections.map(conn => ({
-        id: conn.id,
-        db_type: conn.db_type,
-        host: conn.host,
-        port: conn.port,
-        database_name: conn.database_name,
-        ssl_enabled: conn.ssl_enabled,
-        latency_ms: conn.latency_ms,
-        last_synced_at: conn.last_synced_at,
-        status: conn.status,
-        created_at: conn.created_at
-      }));
-
-      res.json({
-        success: true,
-        connections: safeConnections
+      res.status(500).json({ 
+        success: false,
+        error: 'Failed to create database connection' 
       });
-    } catch (error) {
-      console.error('Get connections error:', error);
-      res.status(500).json({ error: 'Failed to fetch connections' });
     }
   },
+
+async getConnections(req, res) {
+  try {
+    // 🔴 ADD THIS
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Surrogate-Control': 'no-store'
+    });
+
+    const organizationId = req.user.organization_id;
+    const connections = await DatabaseConnection.findByOrganization(organizationId);
+
+    const safeConnections = connections.map(conn => ({
+      id: conn.id,
+      db_type: conn.db_type,
+      host: conn.host,
+      port: conn.port,
+      database_name: conn.database_name,
+      username: conn.username,
+      ssl_enabled: conn.ssl_enabled,
+      latency_ms: conn.latency_ms,
+      last_synced_at: conn.last_synced_at,
+      status: conn.status,
+      created_at: conn.created_at
+    }));
+
+    res.json({
+      success: true,
+      connections: safeConnections
+    });
+  } catch (error) {
+    console.error('Get connections error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch connections'
+    });
+  }
+}
+,
 
   async updateConnection(req, res) {
-    try {
-      const { id } = req.params;
-      const updates = req.body;
-      const organizationId = req.user.organization_id;
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    const organizationId = req.user.organization_id;
 
-      // Verify connection belongs to organization
-      const connection = await DatabaseConnection.findById(id);
-      if (!connection || connection.organization_id !== organizationId) {
-        return res.status(404).json({ error: 'Connection not found' });
-      }
-
-      // If password is being updated, test connection first
-      if (updates.password || updates.host || updates.port || updates.database_name) {
-        const testConfig = {
-          db_type: updates.db_type || connection.db_type,
-          host: updates.host || connection.host,
-          port: updates.port || connection.port,
-          database_name: updates.database_name || connection.database_name,
-          username: updates.username || connection.username,
-          password: updates.password || connection.password,
-          ssl_enabled: updates.ssl_enabled || connection.ssl_enabled
-        };
-
-        const testResult = await testConnection(testConfig);
-        if (!testResult.success) {
-          return res.status(400).json({
-            error: 'Connection test failed',
-            details: testResult.error
-          });
-        }
-
-        updates.latency_ms = testResult.latency_ms;
-        updates.status = 'connected';
-      }
-
-      const updatedConnection = await DatabaseConnection.update(id, updates);
-
-      // Remove sensitive data
-      const { password, ...safeConnection } = updatedConnection;
-
-      res.json({
-        success: true,
-        connection: safeConnection
+    const connection = await DatabaseConnection.findById(id);
+    if (!connection || connection.organization_id !== organizationId) {
+      return res.status(404).json({
+        success: false,
+        error: 'Connection not found'
       });
-    } catch (error) {
-      console.error('Update connection error:', error);
-      res.status(500).json({ error: 'Failed to update connection' });
     }
-  },
+
+    // ---------- NORMALIZE + COMPARE (NO PASSWORD) ----------
+    const normalize = (v) =>
+      typeof v === 'string' ? v.trim() : v;
+
+    const incoming = {
+      db_type: normalize(updates.db_type ?? connection.db_type),
+      host: normalize(updates.host ?? connection.host),
+      port: Number(updates.port ?? connection.port),
+      database_name: normalize(updates.database_name ?? connection.database_name),
+      username: normalize(updates.username ?? connection.username),
+      ssl_enabled: updates.ssl_enabled ?? connection.ssl_enabled
+    };
+
+    const existing = {
+      db_type: normalize(connection.db_type),
+      host: normalize(connection.host),
+      port: Number(connection.port),
+      database_name: normalize(connection.database_name),
+      username: normalize(connection.username),
+      ssl_enabled: connection.ssl_enabled
+    };
+
+    const isSameConfig =
+      incoming.db_type === existing.db_type &&
+      incoming.host === existing.host &&
+      incoming.port === existing.port &&
+      incoming.database_name === existing.database_name &&
+      incoming.username === existing.username &&
+      incoming.ssl_enabled === existing.ssl_enabled;
+
+    // ---------- CASE 1: SAME CONFIG, NO PASSWORD ----------
+    if (isSameConfig && !updates.password) {
+      return res.json({
+        success: true,
+        no_change: true,
+        message: 'No changes detected.'
+      });
+    }
+
+    // ---------- CASE 2: SAME CONFIG, PASSWORD ONLY ----------
+    if (isSameConfig && updates.password) {
+      const testResult = await testConnection({
+        ...incoming,
+        password: updates.password
+      });
+
+      if (!testResult.success) {
+        return res.status(400).json({
+          success: false,
+          error: 'Connection test failed',
+          details: testResult.error
+        });
+      }
+
+      return res.json({
+        success: true,
+        no_change: true,
+        message: 'Credentials verified. No configuration changes.'
+      });
+    }
+
+    // ---------- CASE 3: CONFIG CHANGED ----------
+    const testResult = await testConnection({
+      ...incoming,
+      password: updates.password || connection.password
+    });
+
+    if (!testResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Connection test failed',
+        details: testResult.error
+      });
+    }
+
+    // const updatedConnection = await DatabaseConnection.update(id, {
+    //   ...incoming,
+    //   ...(updates.password && { password: updates.password }),
+    //   latency_ms: testResult.latency_ms,
+    //   status: 'connected'
+    // });
+
+    // const { password, ...safeConnection } = updatedConnection;
+
+    // res.json({
+    //   success: true,
+    //   updated: true,
+    //   connection: safeConnection
+    // });
+
+
+    // Update the connection record
+const updatedConnection = await DatabaseConnection.update(id, {
+  ...incoming,
+  ...(updates.password && { password: updates.password }),
+  latency_ms: testResult.latency_ms,
+  status: 'connected'
+});
+
+// 🔁 Auto re-seed schema ONLY when config actually changed
+await schemaController.discoverAndSeedSchema({
+  params: { connectionId: id },
+  body: { override_existing: true, seed_tables: true, seed_columns: true },
+  user: req.user,
+  query: {}
+});
+
+const { password, ...safeConnection } = updatedConnection;
+res.json({
+  success: true,
+  updated: true,
+  connection: safeConnection,
+  schema_resynced: true // optional signal to frontend
+});
+
+  } catch (error) {
+    console.error('Update connection error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update connection'
+    });
+  }
+}
+,
 
   async testConnection(req, res) {
-    try {
-      const { id } = req.params;
-      const organizationId = req.user.organization_id;
+  try {
+    const { id } = req.params;
+    const organizationId = req.user.organization_id;
 
-      // Get connection
-      const connection = await DatabaseConnection.findById(id);
-      if (!connection || connection.organization_id !== organizationId) {
-        return res.status(404).json({ error: 'Connection not found' });
-      }
-
-      // Test connection
-      const testResult = await testConnection({
-        db_type: connection.db_type,
-        host: connection.host,
-        port: connection.port,
-        database_name: connection.database_name,
-        username: connection.username,
-        password: connection.password,
-        ssl_enabled: connection.ssl_enabled
+    // Get stored connection
+    const connection = await DatabaseConnection.findById(id);
+    if (!connection || connection.organization_id !== organizationId) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Connection not found' 
       });
-
-      // Update connection status
-      await DatabaseConnection.update(id, {
-        status: testResult.success ? 'connected' : 'disconnected',
-        latency_ms: testResult.latency_ms,
-        last_synced_at: testResult.success ? new Date() : null
-      });
-
-      res.json({
-        success: testResult.success,
-        latency_ms: testResult.latency_ms,
-        error: testResult.error
-      });
-    } catch (error) {
-      console.error('Test connection error:', error);
-      res.status(500).json({ error: 'Connection test failed' });
     }
+
+    // Use credentials from request body if provided, otherwise use stored credentials
+    const {
+      host = connection.host,
+      port = connection.port,
+      database_name = connection.database_name,
+      username = connection.username,
+      password = connection.password,
+      ssl_enabled = connection.ssl_enabled,
+      db_type = connection.db_type
+    } = req.body;
+
+    // Test connection with provided or stored credentials
+    const testResult = await testConnection({
+      db_type,
+      host,
+      port,
+      database_name,
+      username,
+      password,
+      ssl_enabled
+    });
+
+    // Update connection status in database
+    await DatabaseConnection.update(id, {
+      status: testResult.success ? 'connected' : 'disconnected',
+      latency_ms: testResult.latency_ms,
+      last_synced_at: testResult.success ? new Date() : null
+    });
+
+    // Return appropriate HTTP status based on test result
+    if (testResult.success) {
+      return res.status(200).json({
+        success: true,
+        latency_ms: testResult.latency_ms
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: testResult.error || 'Database connection failed',
+        latency_ms: testResult.latency_ms
+      });
+    }
+  } catch (error) {
+    console.error('Test connection error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Connection test failed' 
+    });
   }
-};
+}};
 
 module.exports = databaseController;

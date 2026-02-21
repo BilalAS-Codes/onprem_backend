@@ -654,6 +654,30 @@
       "name": "Schema & Mapping",
       "item": [
         {
+          "name": "Get Schema From ConnectionId",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{auth_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/schema/{{connectionId}}/discover-seed",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "schema",
+                "{{connectionId}}",
+                "discover-seed"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Get Tables from Connection",
           "request": {
             "method": "GET",
@@ -767,48 +791,33 @@
           "response": []
         },
         {
-          "name": "Get Mapped Tables",
+          "name": "Create Bulk Column Mapping",
           "request": {
-            "method": "GET",
+            "method": "PUT",
             "header": [
               {
                 "key": "Authorization",
                 "value": "Bearer {{auth_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
               }
             ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"semantic_table_id\": \"32a0c2ec-a0e3-4347-bac0-e6f421a15f74\",\n  \"columns\": [\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    },\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"data_type\": \"character varying\",\n      \"is_nullable\": true,\n      \"default_value\": null,\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    },\n    {\n      \"column_name\": \"ip_address\",\n      \"business_name\": \"IP Address\",\n      \"data_type\": \"character varying\",\n      \"is_nullable\": true,\n      \"default_value\": null,\n      \"department_access\": \"Finance\",\n      \"is_enabled\": true\n    }\n  ]}"
+            },
             "url": {
-              "raw": "{{base_url}}/schema/mapping/tables",
+              "raw": "{{base_url}}/schema/mapping/columns/bulk",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "schema",
                 "mapping",
-                "tables"
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Mapped Columns",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{auth_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/schema/mapping/columns",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "schema",
-                "mapping",
-                "columns"
+                "columns",
+                "bulk"
               ]
             }
           },
