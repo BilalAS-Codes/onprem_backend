@@ -18,13 +18,17 @@ const billingRoutes = require('./routes/billing');
 const auditRoutes = require('./routes/audit');
 const roleRoutes = require('./routes/roles');
 const questionsRoutes = require('./routes/questions');
+const analysisRoutes = require('./routes/analysis');
 
 
 const app = express();
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+app.use(cors({
+  origin: ['https://deals-hawaiian-remote-walked.trycloudflare.com', 'https://linear-arlington-timber-fact.trycloudflare.com'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+}));
 app.use(express.json());
 app.use(morgan('combined'));
 
@@ -48,7 +52,8 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api', userRoutes);
-app.use('/api/',questionsRoutes)
+app.use('/api/', questionsRoutes)
+app.use('/api/v1', analysisRoutes);
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
