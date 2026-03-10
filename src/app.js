@@ -19,6 +19,7 @@ const auditRoutes = require('./routes/audit');
 const roleRoutes = require('./routes/roles');
 const questionsRoutes = require('./routes/questions');
 const analysisRoutes = require('./routes/analysis');
+const chatRoutes = require('./routes/chats');
 
 
 const app = express();
@@ -26,7 +27,14 @@ const app = express();
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://deals-hawaiian-remote-walked.trycloudflare.com', 'https://linear-arlington-timber-fact.trycloudflare.com'],
+  origin: ['https://deals-hawaiian-remote-walked.trycloudflare.com', 'https://linear-arlington-timber-fact.trycloudflare.com'
+
+,
+"https://constructed-catalog-rare-spray.trycloudflare.com"
+,
+"https://kelkoo-differently-jobs-interior.trycloudflare.com",
+ "http://localhost:5173"
+  ],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
 }));
 app.use(express.json());
@@ -54,6 +62,8 @@ app.use('/api/roles', roleRoutes);
 app.use('/api', userRoutes);
 app.use('/api/', questionsRoutes)
 app.use('/api/v1', analysisRoutes);
+app.use('/api/v1/chats', chatRoutes);
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
