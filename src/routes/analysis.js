@@ -651,7 +651,7 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                // schema_info: schemaInfo
             },
             sql_query,
             export_format,
@@ -660,6 +660,14 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
             max_rows: 100000,
             webhook_url: webhookUrl
         };
+
+        console.log('[EXPORT ASYNC] Payload to external API:', {
+            ...externalPayload,
+            db_config: {
+                ...externalPayload.db_config,
+                password: externalPayload.db_config?.password ? '***' : undefined
+            }
+        });
 
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export';
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
