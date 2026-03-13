@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Organization = require('../models/Organization');
 const db = require('../config/database');  
 const { sendOTPEmail } = require('../services/2FAemailService');
+const creditService = require('../services/creditService');
 
 
 const authController = {
@@ -40,6 +41,7 @@ async login(req, res) {
       const otp = generateOTP();
       const otpHash = await hashOTP(otp);
 
+      console.log("Your otp is :",otp)
       await User.setOTP(
         user.id,
         otpHash,
@@ -204,16 +206,8 @@ async toggleTwoFactor(req, res) {
         return res.status(400).json({ error: 'Email already registered' });
       }
 
-      // Get default plan (Starter)
-      const planResult = await db.query(
-        'SELECT id FROM plans WHERE name = $1',
-        ['Starter']
-      );
-      const planId = planResult.rows[0]?.id;
-
-      if (!planId) {
-        return res.status(500).json({ error: 'Default plan not found' });
-      }
+      // Do not auto-assign a paid plan on signup.
+      const planId = null;
 
       // Create organization
       const organization = await Organization.create({
@@ -241,6 +235,13 @@ async toggleTwoFactor(req, res) {
         role_id: adminRoleId,
         department_id: null
       });
+
+      // Grant free trial credits (best-effort)
+      try {
+        await creditService.grantFreeCredits(organization.id, { points: 10, queries: 10 });
+      } catch (creditErr) {
+        console.warn('Failed to grant free credits:', creditErr?.message || creditErr);
+      }
 
       // Generate token
       const token = jwt.sign(

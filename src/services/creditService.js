@@ -37,6 +37,13 @@ const creditService = {
       };
     }
 
+    if (quota.remaining_queries != null && quota.remaining_queries <= 0) {
+      return {
+        allowed: false,
+        reason: 'Query limit reached for current period.'
+      };
+    }
+
     return { allowed: true, quota };
   },
 
@@ -66,16 +73,24 @@ const creditService = {
       const quota = quotaResult.rows[0];
       const pointsBefore = parseFloat(quota.remaining_points);
       const pointsAfter = pointsBefore - pointsToDeduct;
+      const queriesBefore = quota.remaining_queries != null ? Number(quota.remaining_queries) : null;
+      const queriesAfter = queriesBefore != null ? queriesBefore - 1 : null;
 
       if (pointsAfter < 0) {
         throw new Error('Insufficient credits');
+      }
+      if (queriesAfter != null && queriesAfter < 0) {
+        throw new Error('Query limit reached');
       }
 
       // Update quota
       await client.query(
         `UPDATE organization_quota_assignments
          SET remaining_points = $1,
-             remaining_queries = remaining_queries - 1,
+             remaining_queries = CASE
+               WHEN remaining_queries IS NULL THEN NULL
+               ELSE remaining_queries - 1
+             END,
              updated_at = NOW()
          WHERE id = $2`,
         [pointsAfter, quota.id]
@@ -97,7 +112,11 @@ const creditService = {
           -pointsToDeduct,
           metadata.reference_type || 'query',
           metadata.reference_id || null,
-          JSON.stringify(metadata)
+          JSON.stringify({
+            ...metadata,
+            queries_before: queriesBefore,
+            queries_after: queriesAfter
+          })
         ]
       );
 
@@ -500,6 +519,97 @@ const creditService = {
         quota.assigned_points_limit * 100
       ).toFixed(2)
     };
+  }
+  ,
+
+  /**
+   * Grant free trial credits on signup
+   */
+  async grantFreeCredits(organizationId, { points = 10, queries = 10 } = {}) {
+    const client = await db.getClient();
+
+    try {
+      await client.query('BEGIN');
+
+      const existing = await client.query(
+        `SELECT id FROM organization_quota_assignments
+         WHERE organization_id = $1 AND is_active = true
+         ORDER BY created_at DESC LIMIT 1`,
+        [organizationId]
+      );
+
+      if (existing.rows.length) {
+        await client.query('COMMIT');
+        return { skipped: true };
+      }
+
+      let quotaPlanId = null;
+      let qpRes = await client.query(
+        `SELECT id FROM quota_plans WHERE lower(plan_name) = 'free trial' LIMIT 1`
+      );
+
+      if (qpRes.rows.length === 0) {
+        qpRes = await client.query(
+          `INSERT INTO quota_plans (plan_name, description, points_limit, queries_limit, monthly_price, is_active)
+           VALUES ('Free Trial', 'Signup free credits', $1, $2, 0, true)
+           RETURNING id`,
+          [points, queries]
+        );
+      }
+
+      quotaPlanId = qpRes.rows[0].id;
+
+      const effectiveDate = new Date();
+      const expirationDate = new Date();
+      expirationDate.setDate(expirationDate.getDate() + 30);
+
+      const quotaRes = await client.query(
+        `INSERT INTO organization_quota_assignments (
+          organization_id, quota_plan_id,
+          assigned_points_limit, assigned_queries_limit,
+          remaining_points, remaining_queries,
+          effective_date, expiration_date, is_active
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+         RETURNING id`,
+        [
+          organizationId,
+          quotaPlanId,
+          points,
+          queries,
+          points,
+          queries,
+          effectiveDate,
+          expirationDate
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO credit_ledger (
+          organization_id, quota_assignment_id, transaction_type,
+          points_before, points_after, points_changed,
+          reference_type, reference_id, metadata
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          organizationId,
+          quotaRes.rows[0].id,
+          'bonus',
+          0,
+          points,
+          points,
+          'signup',
+          null,
+          JSON.stringify({ action: 'free_trial' })
+        ]
+      );
+
+      await client.query('COMMIT');
+      return { success: true };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 };
 module.exports=creditService;

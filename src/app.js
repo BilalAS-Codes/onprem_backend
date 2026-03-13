@@ -20,6 +20,7 @@ const roleRoutes = require('./routes/roles');
 const questionsRoutes = require('./routes/questions');
 const analysisRoutes = require('./routes/analysis');
 const chatRoutes = require('./routes/chats');
+const { startRaiseInvoicesJob } = require('./jobs/raiseInvoices');
 
 
 const app = express();
@@ -33,9 +34,10 @@ app.use(cors({
 "https://constructed-catalog-rare-spray.trycloudflare.com"
 ,
 "https://kelkoo-differently-jobs-interior.trycloudflare.com",
- "http://localhost:5173"
+ "http://localhost:5173",
+ "https://anything-receives-shorts-twins.trycloudflare.com"
   ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
 app.use(express.json());
 app.use(morgan('combined'));
@@ -63,6 +65,9 @@ app.use('/api', userRoutes);
 app.use('/api/', questionsRoutes)
 app.use('/api/v1', analysisRoutes);
 app.use('/api/v1/chats', chatRoutes);
+
+// Background jobs
+startRaiseInvoicesJob();
 
 // Error handling middleware
 app.use((err, req, res, next) => {

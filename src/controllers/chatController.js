@@ -9,6 +9,28 @@ const chatController = {
 
       console.log('🆕 Creating conversation:', { title, connection_id, user_id, organization_id });
 
+      // Require an active database connection before starting chat
+      const connectionResult = connection_id
+        ? await db.query(
+          `SELECT id FROM database_connections
+           WHERE organization_id = $1 AND id = $2 AND status = 'connected'
+           LIMIT 1`,
+          [organization_id, connection_id]
+        )
+        : await db.query(
+          `SELECT id FROM database_connections
+           WHERE organization_id = $1 AND status = 'connected'
+           LIMIT 1`,
+          [organization_id]
+        );
+
+      if (!connectionResult.rows.length) {
+        return res.status(400).json({
+          error: 'Database connection not found. Please connect a database before starting chat.',
+          code: 'db_not_connected'
+        });
+      }
+
       const result = await db.query(
         `INSERT INTO chat_conversations (organization_id, user_id, connection_id, title)
          VALUES ($1, $2, $3, $4)
