@@ -181,6 +181,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
             }
         });
 
+        console.log(conn, 'this is conn')
         // 3. Construct Payload for External API
         const externalPayload = {
             db_config: {
@@ -210,7 +211,8 @@ router.post('/analyze', authenticateToken, async (req, res) => {
             include_visualizations: true
         };
 
-        console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...', externalPayload);
+        console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
+        console.dir(externalPayload, { depth: null, maxArrayLength: null });
 
         // 4. Call External Digital Ocean API
         // Authorization header as provided in the user's example
@@ -228,6 +230,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         // 5. Return the result from the external API to our frontend
         console.log('✅ [ANALYZE] Returning analysis results to frontend');
+
         res.json(response.data);
 
     } catch (error) {
@@ -338,7 +341,8 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
             context: req.body.context || {}
         };
 
-        console.log('🎯 [SUGGEST] Forwarding suggest-queries request to External API...', externalPayload);
+        console.log('🎯 [SUGGEST] Forwarding suggest-queries request to External API...');
+        console.dir(externalPayload, { depth: null, maxArrayLength: null });
 
         // 4. Call External Digital Ocean API for suggestions
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
@@ -547,7 +551,8 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
         // build webhook URL with conversation_id query param
         const webhookUrl = `${req.protocol}://${req.get('host')}/api/v1/webhook?conversation_id=${encodeURIComponent(conversation_id)}`;
 
-        console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', externalPayload, 'webhookUrl=', webhookUrl);
+        console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', 'webhookUrl=', webhookUrl);
+        console.dir(externalPayload, { depth: null, maxArrayLength: null });
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
 

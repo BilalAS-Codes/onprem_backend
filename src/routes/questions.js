@@ -6,7 +6,7 @@ const { pipeline } = require('stream');
 const copyTo = require('pg-copy-streams').to;
 const exportDb = require('../config/exportDb');
 const { checkCredits } = require('../middleware/creditCheck');
-const creditService = require('../services/creditService')
+const creditService = require('../services/creditService');
 
 router.get('/questions', checkCredits, async (req, res) => {
   const { type, table, page = 1, limit = 10 } = req.query;
@@ -159,6 +159,7 @@ router.get('/questions', checkCredits, async (req, res) => {
         query_type: 'export',
         range
       });
+
       pipeline(stream, res, (err) => {
         client.release();
         if (err && !res.headersSent) {
