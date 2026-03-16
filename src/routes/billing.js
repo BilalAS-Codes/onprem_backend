@@ -11,6 +11,18 @@ router.get('/plan',
   billingController.getCurrentPlan
 );
 
+router.get('/invoices',
+  billingController.getInvoices
+);
+
+router.post('/invoices/:id/pay',
+  billingController.payInvoice
+);
+
+router.get('/invoices/:id/download',
+  billingController.downloadInvoice
+);
+
 router.post(
   '/create-order',
   authenticateToken,

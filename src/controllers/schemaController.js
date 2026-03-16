@@ -48,15 +48,16 @@ const schemaController = {
     const { connectionId, tableName } = req.params;
     const organizationId = req.user.organization_id;
 
-    // Verify connection
-    const connectionCheck = await db.query(
-      'SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2',
+    // Verify connection and fetch config
+    const connectionResult = await db.query(
+      'SELECT * FROM database_connections WHERE id = $1 AND organization_id = $2',
       [connectionId, organizationId]
     );
 
-    if (!connectionCheck.rows[0]) {
+    if (!connectionResult.rows[0]) {
       return res.status(404).json({ error: 'Database connection not found' });
     }
+    const dbConfig = connectionResult.rows[0];
 
     // Get semantic_table_id first
     const tableResult = await db.query(
@@ -84,9 +85,39 @@ const schemaController = {
       [semanticTableId]
     );
 
+    // Enrich with foreign key info from source database
+    let foreignKeyMap = new Map();
+    try {
+      const dbDiscoverer = require('../helpers/dbDiscoverer');
+      const pool = await dbDiscoverer.getConnectionPool(dbConfig);
+      try {
+        const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+          pool,
+          dbConfig.db_type,
+          tableName
+        );
+        foreignKeyMap = new Map(
+          foreignKeys.map((fk) => [String(fk.column_name), fk])
+        );
+      } finally {
+        await pool.end();
+      }
+    } catch (fkError) {
+      console.warn('Foreign key discovery failed:', fkError.message);
+    }
+
+    const columns = result.rows.map((col) => {
+      const fk = foreignKeyMap.get(col.column_name);
+      return {
+        ...col,
+        foreign_table: fk ? fk.foreign_table : null,
+        foreign_column: fk ? fk.foreign_column : null
+      };
+    });
+
     res.json({
       success: true,
-      columns: result.rows
+      columns
     });
   } catch (error) {
     console.error('Get columns error:', error);
