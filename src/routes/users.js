@@ -44,22 +44,55 @@ router.patch('/:id/status',
 );
 
 router.patch("/profile-photo", authenticateToken, async (req, res) => {
-  const { photo } = req.body;
-  if (!photo) {
-    return res.status(400).json({ message: "Photo is required" });
+  try {
+    const { photo, full_name, preferred_language } = req.body;
+
+    if (!photo && !full_name && !preferred_language) {
+      return res.status(400).json({ message: "No profile fields provided" });
+    }
+
+    if (preferred_language && !['en', 'ar'].includes(preferred_language)) {
+      return res.status(400).json({ message: "Invalid preferred language" });
+    }
+
+    // Ensure preferred_language column exists (no-op if already present)
+    await db.query(
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_language VARCHAR(10)"
+    );
+
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (photo) {
+      fields.push(`profile_photo_base64 = $${idx++}`);
+      values.push(photo);
+    }
+    if (full_name) {
+      fields.push(`full_name = $${idx++}`);
+      values.push(full_name);
+    }
+    if (preferred_language) {
+      fields.push(`preferred_language = $${idx++}`);
+      values.push(preferred_language);
+    }
+
+    values.push(req.user.id);
+
+    await db.query(
+      `UPDATE users SET ${fields.join(', ')} WHERE id = $${idx}`,
+      values
+    );
+
+    res.json({
+      success: true,
+      message: "Profile updated",
+      photo
+    });
+  } catch (error) {
+    console.error('Profile update error:', error);
+    res.status(500).json({ message: "Failed to update profile" });
   }
-
-  // Save base64 directly
-  await db.query(
-    "UPDATE users SET profile_photo_base64 = $1 WHERE id = $2",
-    [photo, req.user.id]
-  );
-
-  res.json({
-    success: true,
-    message: "Profile photo updated",
-    photo
-  });
 });
 
 router.post('/verify-otp', authController.verifyOtp);

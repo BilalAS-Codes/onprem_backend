@@ -18,21 +18,38 @@ const billingRoutes = require('./routes/billing');
 const auditRoutes = require('./routes/audit');
 const roleRoutes = require('./routes/roles');
 const questionsRoutes = require('./routes/questions');
+const analysisRoutes = require('./routes/analysis');
+const chatRoutes = require('./routes/chats');
+const { startRaiseInvoicesJob } = require('./jobs/raiseInvoices');
 
 
 const app = express();
 
 // Middleware
 app.use(helmet());
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+  origin: ['https://deals-hawaiian-remote-walked.trycloudflare.com', 'https://linear-arlington-timber-fact.trycloudflare.com'
+
+,
+"https://constructed-catalog-rare-spray.trycloudflare.com"
+,
+"https://kelkoo-differently-jobs-interior.trycloudflare.com",
+ "http://localhost:5173",
+ "https://anything-receives-shorts-twins.trycloudflare.com",
+ "https://quotes-overseas-dictionary-ranger.trycloudflare.com",
+ "https://console-cookie-lifetime-estates.trycloudflare.com",
+ "https://compiler-garmin-leonard-bacterial.trycloudflare.com"
+  ],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+}));
+app.use(express.json({ limit: "5mb" }));
 app.use(morgan('combined'));
 
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
-app.use(express.json({ limit: "5mb" }));
+// express.json configured above with size limit
 
 
 // API Routes
@@ -48,7 +65,13 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api', userRoutes);
-app.use('/api/',questionsRoutes)
+app.use('/api/', questionsRoutes)
+app.use('/api/v1', analysisRoutes);
+app.use('/api/v1/chats', chatRoutes);
+
+// Background jobs
+startRaiseInvoicesJob();
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
