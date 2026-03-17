@@ -12,6 +12,7 @@ const queryRoutes = require('./queries');
 const insightRoutes = require('./insights');
 const billingRoutes = require('./billing');
 const auditRoutes = require('./audit');
+const chatRoutes = require('./chats');
 
 // Mount routes
 router.use('/auth', authRoutes);
@@ -24,5 +25,6 @@ router.use('/queries', queryRoutes);
 router.use('/insights', insightRoutes);
 router.use('/billing', billingRoutes);
 router.use('/audit', auditRoutes);
+router.use('/chats', chatRoutes);
 
 module.exports = router;

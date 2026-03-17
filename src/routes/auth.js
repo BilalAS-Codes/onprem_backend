@@ -20,6 +20,11 @@ router.get('/profile',
   authController.getProfile
 );
 
+
+router.post('/verify-otp',
+  auditLog('VERIFY_OTP', 'Authentication'),
+  authController.verifyOtp
+);
 router.patch('/change-password',
   authenticateToken,
   auditLog('CHANGE_PASSWORD', 'User'),

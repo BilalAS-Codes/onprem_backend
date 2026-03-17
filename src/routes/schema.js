@@ -16,6 +16,27 @@ router.get('/:connectionId/columns/:tableName',
   schemaController.getColumns
 );
 
+router.post('/:connectionId/debug-insert',
+  authorize([ROLES.ADMIN]),
+  schemaController.debugTableInsert
+);
+
+// Bulk column mapping updates (Admin only)
+router.put('/mapping/columns/bulk',
+  authorize([ROLES.ADMIN]),
+  schemaController.bulkUpdateColumnMappings
+);
+// NEW: Discover and seed schema endpoint (Admin only)
+router.post('/:connectionId/discover-seed',
+  authorize([ROLES.ADMIN]),
+  schemaController.discoverAndSeedSchema
+);
+// In your schema routes
+router.delete('/:connectionId',
+  authorize([ROLES.ADMIN]),
+  schemaController.deleteConnection
+);
+
 // Mapping endpoints require Admin role
 router.post('/mapping/table',
   authorize([ROLES.ADMIN]),

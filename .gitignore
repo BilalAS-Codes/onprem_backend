@@ -74,5 +74,13 @@ yarn.lock
 # Docker
 docker-compose.override.yml
 
+
+# Database schema snapshots
+schema_snapshot.sql
+schema_snapshot_actual.sql
+
+# Scripts
+scripts/dump_schema.js
+
 # Documentation
 docs/_build/

@@ -63,6 +63,34 @@ const emailService = {
 
     await transporter.sendMail(mailOptions);
   }
+  ,
+
+  async sendPlanChange({ to, plan_name, price_monthly, payment_id, effective_date, scheduled }) {
+    if (!to) return;
+    const transporter = createTransporter();
+    const effectiveText = effective_date
+      ? new Date(effective_date).toLocaleDateString()
+      : null;
+
+    const mailOptions = {
+      from: `"ZeroQueries" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+      to,
+      subject: scheduled ? `Plan Change Scheduled: ${plan_name}` : `Plan Updated: ${plan_name}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>${scheduled ? 'Your plan change is scheduled' : 'Your plan has been updated'}</h2>
+          <p>Plan: <strong>${plan_name}</strong></p>
+          <p>Price: <strong>${price_monthly || 'N/A'} / month</strong></p>
+          ${scheduled && effectiveText ? `<p>Effective Date: <strong>${effectiveText}</strong></p>` : ''}
+          <p>Payment ID: <strong>${payment_id || 'N/A'}</strong></p>
+          <br>
+          <p>Thank you,<br>The ZeroQueries Team</p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+  }
 };
 
 module.exports = emailService;
