@@ -7,6 +7,7 @@ require('dotenv').config();
 
 // Import routes
 const authRoutes = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
 const organizationRoutes = require('./routes/organizations');
 const userRoutes = require('./routes/users');
 const departmentRoutes = require('./routes/departments');
@@ -28,19 +29,8 @@ const app = express();
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://deals-hawaiian-remote-walked.trycloudflare.com', 'https://linear-arlington-timber-fact.trycloudflare.com'
-
-,
-"https://constructed-catalog-rare-spray.trycloudflare.com"
-,
-"https://kelkoo-differently-jobs-interior.trycloudflare.com",
- "http://localhost:5173",
- "https://anything-receives-shorts-twins.trycloudflare.com",
- "https://quotes-overseas-dictionary-ranger.trycloudflare.com",
- "https://console-cookie-lifetime-estates.trycloudflare.com",
- "https://compiler-garmin-leonard-bacterial.trycloudflare.com"
-  ],
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  origin: "*",
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json({ limit: "5mb" }));
 app.use(morgan('combined'));
@@ -54,6 +44,7 @@ app.get('/health', (req, res) => {
 
 // API Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/departments', departmentRoutes);
