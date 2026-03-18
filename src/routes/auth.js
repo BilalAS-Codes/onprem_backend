@@ -25,6 +25,10 @@ router.post('/verify-otp',
   auditLog('VERIFY_OTP', 'Authentication'),
   authController.verifyOtp
 );
+router.post('/resend-otp',
+  auditLog('RESEND_OTP', 'Authentication'),
+  authController.resendOtp
+);
 router.patch('/change-password',
   authenticateToken,
   auditLog('CHANGE_PASSWORD', 'User'),
