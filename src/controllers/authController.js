@@ -34,14 +34,14 @@ async login(req, res) {
     }
 
     // 🔐 4. IF 2FA IS ENABLED → STOP LOGIN HERE
-    if (user.two_factor_enabled) {
+    // 4. Enforce 2FA for all users (default enabled for everyone)
+    {
       const { generateOTP, hashOTP } = require('../utils/otp');
-      const emailService = require('../services/emailService');
 
       const otp = generateOTP();
       const otpHash = await hashOTP(otp);
 
-      console.log("Your otp is :",otp)
+      console.log("Your otp is :", otp)
       await User.setOTP(
         user.id,
         otpHash,
@@ -59,6 +59,7 @@ async login(req, res) {
         userId: user.id
       });
     }
+
 
     // 5. Get organization
     const organization = await Organization.findById(user.organization_id);
@@ -233,7 +234,8 @@ async toggleTwoFactor(req, res) {
         email,
         password,
         role_id: adminRoleId,
-        department_id: null
+        department_id: null,
+        two_factor_enabled: true
       });
 
       // Grant free trial credits (best-effort)
@@ -243,30 +245,27 @@ async toggleTwoFactor(req, res) {
         console.warn('Failed to grant free credits:', creditErr?.message || creditErr);
       }
 
-      // Generate token
-      const token = jwt.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: 'Admin',
-          organization_id: organization.id
-        },
-        jwtConfig.secret,
-        { expiresIn: jwtConfig.expiresIn }
+      // Enforce 2FA on signup: send OTP and require verification before issuing JWT
+      const { generateOTP, hashOTP } = require('../utils/otp');
+      const otp = generateOTP();
+      const otpHash = await hashOTP(otp);
+
+      await User.setOTP(
+        user.id,
+        otpHash,
+        new Date(Date.now() + 5 * 60 * 1000)
       );
 
-      // Remove sensitive data
-      const { password_hash, ...userData } = user;
+      await sendOTPEmail({
+        to: user.email,
+        otp
+      });
 
       res.status(201).json({
         success: true,
-        message: 'Organization and admin user created successfully',
-        token,
-        user: {
-          ...userData,
-          role: 'Admin'
-        },
-        organization
+        message: 'OTP sent for signup verification',
+        requires2FA: true,
+        userId: user.id
       });
     } catch (error) {
       console.error('Registration error:', error);
