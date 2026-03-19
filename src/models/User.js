@@ -23,13 +23,21 @@ const User = {
   },
 
   async create(userData) {
-    const { organization_id, full_name, email, password, role_id, department_id } = userData;
+    const { organization_id, full_name, email, password, role_id, department_id, two_factor_enabled } = userData;
     const passwordHash = await bcrypt.hash(password, 10);
     
     const result = await db.query(
-      'INSERT INTO users (organization_id, full_name, email, password_hash, role_id, department_id) ' +
-      'VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [organization_id, full_name, email, passwordHash, role_id, department_id]
+      'INSERT INTO users (organization_id, full_name, email, password_hash, role_id, department_id, two_factor_enabled) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [
+        organization_id,
+        full_name,
+        email,
+        passwordHash,
+        role_id,
+        department_id,
+        two_factor_enabled ?? false
+      ]
     );
     
     return result.rows[0];
