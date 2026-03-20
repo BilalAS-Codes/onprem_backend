@@ -7,6 +7,7 @@ const { checkCredits } = require('../middleware/creditCheck');
 const creditService = require('../services/creditService');
 const jwt = require('jsonwebtoken');
 const { jwtConfig } = require('../config/jwt');
+const dbDiscoverer = require('../helpers/dbDiscoverer');
 
 // In-memory storage for Server-Sent Events clients keyed by conversation ID
 const sseClients = {};
@@ -115,6 +116,81 @@ function constructConnectionString(conn) {
     return `postgresql://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
 }
 
+async function buildSemanticContext(conn) {
+    const schemaResult = await db.query(
+        `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
+         FROM semantic_tables st
+         JOIN semantic_columns sc ON st.id = sc.semantic_table_id
+         WHERE st.connection_id = $1`,
+        [conn.id]
+    );
+
+    const schemaInfo = {};
+    const allowedTables = [];
+    const disallowedTables = [];
+    const allowedColumns = {};
+    const restrictedColumns = {};
+
+    schemaResult.rows.forEach((row) => {
+        const tbl = row.table_name;
+        const col = row.column_name;
+
+        if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
+        schemaInfo[tbl].push(col);
+
+        if (row.table_enabled) {
+            if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
+
+            if (row.column_enabled) {
+                if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
+                allowedColumns[tbl].push(col);
+            } else {
+                if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
+                restrictedColumns[tbl].push(col);
+            }
+        } else if (!disallowedTables.includes(tbl)) {
+            disallowedTables.push(tbl);
+        }
+    });
+
+    const relationships = [];
+
+    try {
+        const pool = await dbDiscoverer.getConnectionPool(conn);
+        try {
+            for (const tableName of allowedTables) {
+                const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+                    pool,
+                    conn.db_type,
+                    tableName
+                );
+
+                foreignKeys.forEach((fk) => {
+                    if (!fk?.column_name || !fk?.foreign_table || !fk?.foreign_column) return;
+
+                    relationships.push({
+                        from_field: `${tableName}.${fk.column_name}`,
+                        to_field: `${fk.foreign_table}.${fk.foreign_column}`
+                    });
+                });
+            }
+        } finally {
+            await pool.end();
+        }
+    } catch (relationshipError) {
+        console.warn('[ANALYSIS] Relationship discovery failed:', relationshipError.message);
+    }
+
+    return {
+        schemaInfo,
+        allowedTables,
+        disallowedTables,
+        allowedColumns,
+        restrictedColumns,
+        relationships
+    };
+}
+
 /**
  * POST /api/v1/analyze
  * Proxies the request to the external AI Analysis service with full context
@@ -142,44 +218,14 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         const conn = connectionResult.rows[0];
 
-        // 2. Fetch schema info (Tables & Columns)
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-
-            // Build schema_info map
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-
-            // Access Policy logic
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         console.log(conn, 'this is conn')
         // 3. Construct Payload for External API
@@ -192,7 +238,8 @@ router.post('/analyze', authenticateToken, async (req, res) => {
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -274,44 +321,14 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
 
         const conn = connectionResult.rows[0];
 
-        // 2. Fetch schema info (Tables & Columns)
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-
-            // Build schema_info map
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-
-            // Access Policy logic
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         // 3. Construct Payload for External API
         const externalPayload = {
@@ -323,7 +340,8 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -458,7 +476,7 @@ router.post('/webhook', async (req, res) => {
  * forwards to external API, returns the task id to caller.
  */
 router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) => {
-    const { question, max_rows = 100, locale = 'en', include_insights = true, include_visualizations = true } = req.body;
+    const { question, max_rows = 25, locale = 'en', include_insights = true, include_visualizations = true } = req.body;
     const { organization_id, role } = req.user;
 
     // conversation_id will be carried via webhook URL query parameter
@@ -486,38 +504,14 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
 
         const conn = connectionResult.rows[0];
 
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         const externalPayload = {
             db_config: {
@@ -528,7 +522,8 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -590,7 +585,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             pollTaskStatus(returnedTaskId, conversation_id);
         }
     } catch (error) {
-        console.error('❌ [ASYNC ANALYZE] Proxy Error:', error.response?.data || error.message);
+        console.error(' [ASYNC ANALYZE] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'External analysis service failed' };
         res.status(statusCode).json({
@@ -808,7 +803,7 @@ router.get('/task/:taskId/status', authenticateToken, async (req, res) => {
 
         res.json(response.data);
     } catch (error) {
-        console.error('❌ [TASK STATUS] Proxy Error:', error.response?.data || error.message);
+        console.error(' [TASK STATUS] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'Failed to fetch task status' };
         res.status(statusCode).json({
@@ -836,7 +831,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
 
         res.json(response.data);
     } catch (error) {
-        console.error('❌ [TASK RESULT] Proxy Error:', error.response?.data || error.message);
+        console.error('[TASK RESULT] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'Failed to fetch task result' };
         res.status(statusCode).json({
