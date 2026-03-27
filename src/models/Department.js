@@ -28,7 +28,8 @@ const Department = {
   async findByOrganization(organizationId) {
     const result = await db.query(
       `SELECT d.*, 
-              COUNT(u.id) as user_count,
+              COUNT(DISTINCT u.id) as user_count,
+              COUNT(DISTINCT dp.table_name) as tables_count,
               STRING_AGG(DISTINCT dp.table_name, ', ') as accessible_tables
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id AND u.status = 'active'

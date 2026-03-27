@@ -15,6 +15,18 @@ router.get('/invoices',
   billingController.getInvoices
 );
 
+router.get('/payments',
+  billingController.getPayments
+);
+
+router.get('/payment-methods',
+  billingController.getPaymentMethods
+);
+
+router.get('/usage-history',
+  billingController.getUsageHistory
+);
+
 router.post('/invoices/:id/pay',
   billingController.payInvoice
 );
@@ -32,6 +44,14 @@ router.post(
 router.post(
   '/verify-payment',
   billingController.verifyRazorpayPayment
+);
+
+router.post('/subscription/cancel',
+  billingController.cancelSubscription
+);
+
+router.post('/subscription/reactivate',
+  billingController.reactivateSubscription
 );
 
 module.exports = router;

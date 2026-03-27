@@ -11,6 +11,7 @@ const dbDiscoverer = require('../helpers/dbDiscoverer');
 
 // In-memory storage for Server-Sent Events clients keyed by conversation ID
 const sseClients = {};
+const taskPollers = new Map();
 
 // Helper to authenticate token supplied via query param (for SSE)
 // also accepts Authorization header if EventSource client can provide it.
@@ -270,7 +271,13 @@ function formatSchemaInfoEntry(columnName, dataType, enumValues = []) {
 
 async function buildSemanticContext(conn) {
     const schemaResult = await db.query(
-        `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.data_type, sc.is_enabled as column_enabled
+        `SELECT
+            st.table_name,
+            st.is_enabled as table_enabled,
+            sc.column_name,
+            sc.data_type,
+            sc.enum_values,
+            sc.is_enabled as column_enabled
          FROM semantic_tables st
          JOIN semantic_columns sc ON st.id = sc.semantic_table_id
          WHERE st.connection_id = $1`,
@@ -293,7 +300,13 @@ async function buildSemanticContext(conn) {
         if (!tableColumnTypes[tbl]) tableColumnTypes[tbl] = {};
         tableColumnTypes[tbl][col] = dataType;
 
-        schemaInfo[tbl].push(formatSchemaInfoEntry(col, dataType));
+        schemaInfo[tbl].push(
+            formatSchemaInfoEntry(
+                col,
+                dataType,
+                Array.isArray(row.enum_values) ? row.enum_values : []
+            )
+        );
 
         if (row.table_enabled) {
             if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
@@ -313,42 +326,71 @@ async function buildSemanticContext(conn) {
     const relationships = [];
 
     try {
+        const storedRelationshipsResult = await db.query(
+            `SELECT source_table, source_column, target_table, target_column
+             FROM semantic_relationships
+             WHERE connection_id = $1
+             ORDER BY source_table, source_column, target_table, target_column`,
+            [conn.id]
+        );
+
+        storedRelationshipsResult.rows.forEach((relationship) => {
+            if (!relationship?.source_table || !relationship?.source_column || !relationship?.target_table || !relationship?.target_column) {
+                return;
+            }
+
+            relationships.push({
+                from_field: `${relationship.source_table}.${relationship.source_column}`,
+                to_field: `${relationship.target_table}.${relationship.target_column}`
+            });
+        });
+    } catch (storedRelationshipError) {
+        console.warn('[ANALYSIS] Stored relationship lookup failed:', storedRelationshipError.message);
+    }
+
+    try {
         const pool = await dbDiscoverer.getConnectionPool(conn);
         try {
             for (const tableName of Object.keys(schemaInfo)) {
-                const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
-                    pool,
-                    conn.db_type,
-                    tableName
-                );
+                const hasStoredEnumMetadata = schemaInfo[tableName]?.some((entry) => entry.includes('"enum_values"'));
 
-                if (Array.isArray(columnMetadata) && columnMetadata.length > 0) {
-                    schemaInfo[tableName] = columnMetadata.map((column) => {
-                        const fallbackType = tableColumnTypes[tableName]?.[column.column_name];
-                        return formatSchemaInfoEntry(
-                            column.column_name,
-                            column.data_type || fallbackType,
-                            column.enum_values
-                        );
-                    });
+                if (!hasStoredEnumMetadata) {
+                    const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
+                        pool,
+                        conn.db_type,
+                        tableName
+                    );
+
+                    if (Array.isArray(columnMetadata) && columnMetadata.length > 0) {
+                        schemaInfo[tableName] = columnMetadata.map((column) => {
+                            const fallbackType = tableColumnTypes[tableName]?.[column.column_name];
+                            return formatSchemaInfoEntry(
+                                column.column_name,
+                                column.data_type || fallbackType,
+                                column.enum_values
+                            );
+                        });
+                    }
                 }
             }
 
-            for (const tableName of allowedTables) {
-                const foreignKeys = await dbDiscoverer.discoverForeignKeys(
-                    pool,
-                    conn.db_type,
-                    tableName
-                );
+            if (relationships.length === 0) {
+                for (const tableName of allowedTables) {
+                    const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+                        pool,
+                        conn.db_type,
+                        tableName
+                    );
 
-                foreignKeys.forEach((fk) => {
-                    if (!fk?.column_name || !fk?.foreign_table || !fk?.foreign_column) return;
+                    foreignKeys.forEach((fk) => {
+                        if (!fk?.column_name || !fk?.foreign_table || !fk?.foreign_column) return;
 
-                    relationships.push({
-                        from_field: `${tableName}.${fk.column_name}`,
-                        to_field: `${fk.foreign_table}.${fk.foreign_column}`
+                        relationships.push({
+                            from_field: `${tableName}.${fk.column_name}`,
+                            to_field: `${fk.foreign_table}.${fk.foreign_column}`
+                        });
                     });
-                });
+                }
             }
         } finally {
             await pool.end();
@@ -666,11 +708,20 @@ router.post('/webhook', async (req, res) => {
     );
 
     console.log('🔔 [WEBHOOK] Received update for conversation', convId, update);
+    const normalizedStatus = String(normalizedUpdate.status || '').toUpperCase();
+    if (
+        normalizedUpdate.task_id &&
+        (normalizedStatus === 'COMPLETED' || normalizedStatus === 'FAILED') &&
+        taskPollers.has(normalizedUpdate.task_id)
+    ) {
+        clearInterval(taskPollers.get(normalizedUpdate.task_id));
+        taskPollers.delete(normalizedUpdate.task_id);
+    }
     await updateAnalysisApiLogByTaskId({
         taskId: normalizedUpdate.task_id || normalizedUpdate.result?.request_id || normalizedUpdate.details?.result?.request_id,
         responsePayload: normalizedUpdate,
-        errorPayload: String(normalizedUpdate.status || '').toUpperCase() === 'FAILED' ? normalizedUpdate : null,
-        success: String(normalizedUpdate.status || '').toUpperCase() === 'COMPLETED',
+        errorPayload: normalizedStatus === 'FAILED' ? normalizedUpdate : null,
+        success: normalizedStatus === 'COMPLETED',
         conversationId: convId || null
     });
     // broadcast event
@@ -1097,6 +1148,10 @@ async function pollTaskStatus(taskId, conversationId) {
     console.log('🔁 Starting poll for task', taskId);
     const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
     const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+    if (taskPollers.has(taskId)) {
+        clearInterval(taskPollers.get(taskId));
+        taskPollers.delete(taskId);
+    }
     const interval = setInterval(async () => {
         try {
             const resp = await axios.get(statusUrl, {
@@ -1109,12 +1164,13 @@ async function pollTaskStatus(taskId, conversationId) {
             console.log('🔁 poll response', data);
             // some versions wrap under { success,data: {...} }
             const status = data.status ?? data.data?.status;
+            const normalizedStatus = String(status || '').toUpperCase();
             console.log('🔁 poll status', status);
             await updateAnalysisApiLogByTaskId({
                 taskId,
                 responsePayload: normalizeTaskUpdatePayload(data, taskId, conversationId),
-                errorPayload: String(status || '').toUpperCase() === 'FAILED' ? normalizeTaskUpdatePayload(data, taskId, conversationId) : null,
-                success: String(status || '').toUpperCase() === 'COMPLETED',
+                errorPayload: normalizedStatus === 'FAILED' ? normalizeTaskUpdatePayload(data, taskId, conversationId) : null,
+                success: normalizedStatus === 'COMPLETED',
                 conversationId
             });
             // broadcast update via SSE, send entire response so frontend can inspect
@@ -1123,14 +1179,16 @@ async function pollTaskStatus(taskId, conversationId) {
                 'task_update',
                 normalizeTaskUpdatePayload(data, taskId, conversationId)
             );
-            if (status === 'COMPLETED' || status === 'FAILED') {
+            if (normalizedStatus === 'COMPLETED' || normalizedStatus === 'FAILED') {
                 clearInterval(interval);
+                taskPollers.delete(taskId);
                 // frontend will fetch final result when it sees completed via SSE
             }
         } catch (e) {
             console.error('🔁 poll error', e.message);
         }
     }, 5000);
+    taskPollers.set(taskId, interval);
 }
 
 

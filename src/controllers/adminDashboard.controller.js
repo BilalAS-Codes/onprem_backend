@@ -77,9 +77,9 @@ class AdminDashboardController {
 
   async getOrganizationInfo(organizationId) {
     const query = await db.query(
-      `SELECT o.id, o.name, o.domain, p.name as plan_name, o.created_at, o.is_active
+      `SELECT o.id, o.name, o.domain, COALESCE(p.name, 'Free Trial') as plan_name, o.created_at, o.is_active
        FROM organizations o
-       JOIN plans p ON o.plan_id = p.id
+       LEFT JOIN plans p ON o.plan_id = p.id
        WHERE o.id = $1`,
       [organizationId]
     );
@@ -87,8 +87,6 @@ class AdminDashboardController {
   }
 
   async getQuotaSummary(organizationId, range) {
-    const dateFilter = this.getDateFilter(range);
-    
     const query = await db.query(
       `WITH current_quota AS (
          SELECT assigned_points_limit, assigned_queries_limit, 
@@ -97,26 +95,19 @@ class AdminDashboardController {
          WHERE organization_id = $1 AND is_active = true
          ORDER BY effective_date DESC
          LIMIT 1
-       ),
-       usage_summary AS (
-         SELECT 
-           COALESCE(SUM(query_count), 0) as total_queries_used,
-           COALESCE(SUM(total_points_used), 0) as total_points_used
-         FROM usage_tracking
-         WHERE organization_id = $1 ${dateFilter}
        )
        SELECT 
          cq.assigned_queries_limit as total_queries_limit,
-         us.total_queries_used as queries_used,
+         GREATEST(cq.assigned_queries_limit - COALESCE(cq.remaining_queries, 0), 0) as queries_used,
          cq.remaining_queries,
-         ROUND((us.total_queries_used::numeric / NULLIF(cq.assigned_queries_limit, 0) * 100), 1) as queries_usage_percentage,
+         ROUND((GREATEST(cq.assigned_queries_limit - COALESCE(cq.remaining_queries, 0), 0)::numeric / NULLIF(cq.assigned_queries_limit, 0) * 100), 1) as queries_usage_percentage,
          cq.assigned_points_limit as total_points_limit,
-         us.total_points_used as points_used,
+         GREATEST(cq.assigned_points_limit - COALESCE(cq.remaining_points, 0), 0) as points_used,
          cq.remaining_points,
-         ROUND((us.total_points_used::numeric / NULLIF(cq.assigned_points_limit, 0) * 100), 1) as points_usage_percentage,
+         ROUND((GREATEST(cq.assigned_points_limit - COALESCE(cq.remaining_points, 0), 0)::numeric / NULLIF(cq.assigned_points_limit, 0) * 100), 1) as points_usage_percentage,
          cq.expiration_date as query_limit_reset_date,
          0 as overage_charges
-       FROM current_quota cq, usage_summary us`,
+       FROM current_quota cq`,
       [organizationId]
     );
     
@@ -136,11 +127,11 @@ class AdminDashboardController {
 
   async getDatabaseConnection(organizationId) {
     const query = await db.query(
-      `SELECT id, db_type, host, port, database_name, username, 
+       `SELECT id, db_type, host, port, database_name, username, 
               ssl_enabled, status, latency_ms, last_synced_at,
               (SELECT COUNT(*) FROM semantic_tables WHERE connection_id = dc.id) as tables_count
        FROM database_connections dc
-       WHERE organization_id = $1 AND status = 'active'
+       WHERE organization_id = $1 AND status IN ('active', 'connected')
        ORDER BY created_at DESC
        LIMIT 1`,
       [organizationId]
@@ -275,11 +266,10 @@ class AdminDashboardController {
          COUNT(DISTINCT u.id) as user_count,
          COUNT(qh.id) as query_count,
          ROUND((COUNT(CASE WHEN qh.status = 'success' THEN 1 END)::numeric / NULLIF(COUNT(qh.id), 0) * 100), 1) as success_rate,
-         COALESCE(SUM(ut.total_points_used), 0) as points_used
+         0::numeric as points_used
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id
        LEFT JOIN query_history qh ON u.id = qh.user_id
-       LEFT JOIN usage_tracking ut ON d.organization_id = ut.organization_id
        WHERE d.organization_id = $1
        GROUP BY d.id, d.name, d.privacy_level
        ORDER BY query_count DESC`,
@@ -294,12 +284,12 @@ class AdminDashboardController {
     const currentPlan = await db.query(
       `SELECT 
          p.name,
-         p.price_monthly as price,
+         COALESCE(p.price_monthly, 0) as price,
          'monthly' as billing_cycle,
          o.created_at + INTERVAL '1 month' as next_billing_date,
-         p.features
+         COALESCE(p.features, '{}'::json) as features
        FROM organizations o
-       JOIN plans p ON o.plan_id = p.id
+       LEFT JOIN plans p ON o.plan_id = p.id
        WHERE o.id = $1`,
       [organizationId]
     );
@@ -310,13 +300,14 @@ class AdminDashboardController {
          id,
          'INV-' || EXTRACT(YEAR FROM created_at) || '-' || LPAD(CAST(EXTRACT(MONTH FROM created_at) AS TEXT), 2, '0') as invoice_number,
          amount,
-         status,
+         CASE WHEN lower(status) IN ('paid', 'completed') THEN 'paid' ELSE lower(status) END as status,
          TO_CHAR(created_at, 'Mon YYYY') as period,
          created_at as issued_at,
          CASE WHEN status = 'completed' THEN created_at ELSE NULL END as paid_at,
          '/api/billing/invoices/' || id as download_url
        FROM billing_transactions
        WHERE organization_id = $1
+         AND lower(status) <> 'created'
        ORDER BY created_at DESC
        LIMIT 5`,
       [organizationId]
