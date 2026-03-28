@@ -119,6 +119,32 @@ const getPendingPlanChange = async (organizationId) => {
   return res.rows[0] || null;
 };
 
+const resolvePendingChangeType = async (organizationId, pendingChange) => {
+  if (!pendingChange?.to_plan_id) return 'downgrade';
+
+  try {
+    const result = await db.query(
+      `SELECT
+         current_plan.price_monthly AS current_price,
+         target_plan.price_monthly AS target_price
+       FROM organizations o
+       LEFT JOIN plans current_plan ON o.plan_id = current_plan.id
+       LEFT JOIN plans target_plan ON target_plan.id = $2
+       WHERE o.id = $1`,
+      [organizationId, pendingChange.to_plan_id]
+    );
+
+    const row = result.rows[0] || {};
+    const currentPrice = Number(row.current_price || 0);
+    const targetPrice = Number(row.target_price || 0);
+
+    return targetPrice >= currentPrice ? 'upgrade' : 'downgrade';
+  } catch (error) {
+    console.warn('Failed to resolve pending change type:', error.message);
+    return 'downgrade';
+  }
+};
+
 const applyDuePlanChanges = async (organizationId) => {
   await ensurePlanChangeTable();
   const dueRes = await db.query(
@@ -163,6 +189,7 @@ const billingController = {
       // Get current plan + usage
       const currentPlanResult = await db.query(
         `SELECT o.id AS organization_id,
+                o.created_at,
                 o.plan_id AS current_plan_id,
                 p.id AS plan_id,
                 p.name AS plan_name,
@@ -208,6 +235,7 @@ const billingController = {
       );
 
       const pendingChange = await getPendingPlanChange(organizationId);
+      const pendingChangeType = await resolvePendingChangeType(organizationId, pendingChange);
 
       const currentPlan = row.plan_id
         ? {
@@ -258,7 +286,7 @@ const billingController = {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
               effective_date: pendingChange.effective_date,
-              type: 'downgrade'
+              type: pendingChangeType
             }
             : null
         }
@@ -298,7 +326,7 @@ const billingController = {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
               effective_date: pendingChange.effective_date,
-              type: 'downgrade'
+              type: pendingChangeType
             }
             : null
         };
@@ -477,11 +505,10 @@ const billingController = {
         return res.status(400).json({ error: 'Transaction missing plan information' });
       }
 
-      // Decide if upgrade or downgrade based on price
       const currentPlanRes = await db.query(
         `SELECT p.id, p.price_monthly
          FROM organizations o
-         JOIN plans p ON o.plan_id = p.id
+         LEFT JOIN plans p ON o.plan_id = p.id
          WHERE o.id = $1`,
         [txn.organization_id]
       );
@@ -491,13 +518,14 @@ const billingController = {
       );
       const currentPrice = Number(currentPlanRes.rows[0]?.price_monthly || 0);
       const newPrice = Number(newPlanRes.rows[0]?.price_monthly || 0);
-      const isDowngrade = newPrice < currentPrice;
+      const isDowngrade = currentPlanRes.rows[0]?.id && newPrice < currentPrice;
+      const quota = await creditService.getActiveQuota(txn.organization_id);
 
       if (isDowngrade) {
-        // Schedule downgrade at end of current period
-        const quota = await creditService.getActiveQuota(txn.organization_id);
-        const effectiveDate = quota?.expiration_date || new Date();
-
+        const effectiveDate = quota?.expiration_date ? new Date(quota.expiration_date) : new Date();
+        if (quota?.expiration_date) {
+          effectiveDate.setDate(effectiveDate.getDate() + 1);
+        }
         await ensurePlanChangeTable();
         const existing = await db.query(
           `SELECT id FROM billing_plan_changes
@@ -505,6 +533,8 @@ const billingController = {
            ORDER BY created_at DESC LIMIT 1`,
           [txn.organization_id]
         );
+
+        const fromPlanId = currentPlanRes.rows[0]?.id || txn.plan_id;
 
         if (existing.rows.length) {
           await db.query(
@@ -520,7 +550,7 @@ const billingController = {
           await db.query(
             `INSERT INTO billing_plan_changes (organization_id, from_plan_id, to_plan_id, effective_date, status, transaction_id)
              VALUES ($1, $2, $3, $4, 'scheduled', $5)`,
-            [txn.organization_id, currentPlanRes.rows[0]?.id, txn.plan_id, effectiveDate, txn.id]
+            [txn.organization_id, fromPlanId, txn.plan_id, effectiveDate, txn.id]
           );
         }
 
@@ -542,7 +572,7 @@ const billingController = {
         return res.json({ success: true, scheduled: true, effective_date: effectiveDate });
       }
 
-      // Upgrade: apply immediately
+      // No usable quota left: apply immediately.
       await Organization.updatePlan(txn.organization_id, txn.plan_id);
 
       // Resolve quota_plans.id for this plan (if exists) to pass explicitly
@@ -564,7 +594,8 @@ const billingController = {
         await creditService.allocateCredits(
           txn.organization_id,
           quotaPlanId || txn.plan_id,
-          razorpay_payment_id
+          razorpay_payment_id,
+          { carryover_unused: true }
         );
       } catch (allocErr) {
         console.error('allocateCredits failed:', allocErr);

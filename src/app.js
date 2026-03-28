@@ -22,6 +22,7 @@ const questionsRoutes = require('./routes/questions');
 const analysisRoutes = require('./routes/analysis');
 const chatRoutes = require('./routes/chats');
 const { startRaiseInvoicesJob } = require('./jobs/raiseInvoices');
+const { startQuotaExpiryJob } = require('./jobs/expiryQuotas');
 
 
 const app = express();
@@ -62,6 +63,7 @@ app.use('/api/v1/chats', chatRoutes);
 
 // Background jobs
 startRaiseInvoicesJob();
+startQuotaExpiryJob();
 
 // Error handling middleware
 app.use((err, req, res, next) => {
