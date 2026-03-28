@@ -166,14 +166,40 @@ class AdminDashboardController {
          u.full_name as user_name,
          u.email,
          r.name as role,
-         COUNT(qh.id) as query_count,
-         ROUND((COUNT(CASE WHEN qh.status = 'success' THEN 1 END)::numeric / NULLIF(COUNT(qh.id), 0) * 100), 1) as success_rate,
-         MAX(qh.created_at) as last_active
+         COALESCE(activity.query_count, 0) as query_count,
+         ROUND((COALESCE(activity.success_count, 0)::numeric / NULLIF(COALESCE(activity.query_count, 0), 0) * 100), 1) as success_rate,
+         activity.last_active
        FROM users u
        JOIN roles r ON u.role_id = r.id
-       LEFT JOIN query_history qh ON u.id = qh.user_id
+       LEFT JOIN (
+         SELECT
+           activity.user_id,
+           COUNT(*) as query_count,
+           COUNT(CASE WHEN activity.is_success THEN 1 END) as success_count,
+           MAX(activity.created_at) as last_active
+         FROM (
+           SELECT
+             qh.user_id,
+             qh.created_at,
+             (qh.status = 'success') as is_success
+           FROM query_history qh
+           WHERE qh.organization_id = $1
+
+           UNION ALL
+
+           SELECT
+             aal.user_id,
+             aal.created_at,
+             COALESCE(aal.success, false) as is_success
+           FROM analysis_api_logs aal
+           WHERE aal.organization_id = $1
+             AND aal.user_id IS NOT NULL
+             AND aal.endpoint IN ('/api/v1/analyze', '/api/v1/analyze-async')
+         ) activity
+         GROUP BY activity.user_id
+       ) activity ON u.id = activity.user_id
        WHERE u.organization_id = $1
-       GROUP BY u.id, u.full_name, u.email, r.name
+       GROUP BY u.id, u.full_name, u.email, r.name, activity.query_count, activity.success_count, activity.last_active
        ORDER BY query_count DESC
        LIMIT 5`,
       [organizationId]

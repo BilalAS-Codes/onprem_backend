@@ -1,6 +1,17 @@
 const db = require('../config/database');
 
 const creditService = {
+  isQuotaExhausted(quota) {
+    if (!quota) return true;
+    const remainingPoints = Number(quota.remaining_points || 0);
+    const remainingQueries =
+      quota.remaining_queries == null ? null : Number(quota.remaining_queries);
+
+    if (remainingPoints <= 0) return true;
+    if (remainingQueries != null && remainingQueries <= 0) return true;
+    return false;
+  },
+
   /**
    * Get active quota assignment for organization
    */
@@ -227,11 +238,11 @@ const creditService = {
   /**
    * Allocate credits on plan purchase/renewal (ChatGPT model)
    */
-  async allocateCredits(organizationId, planId, paymentId) {
+  async allocateCredits(organizationId, planId, paymentId, options = {}) {
     const client = await db.getClient();
 
     try {
-      console.info('allocateCredits called', { organizationId, planId, paymentId });
+      console.info('allocateCredits called', { organizationId, planId, paymentId, options });
       await client.query('BEGIN');
 
       // Get plan details
@@ -320,11 +331,13 @@ const creditService = {
       const quotaPlanId = plan.id; // resolved quota_plans.id
       console.info('Resolved quota plan', { quotaPlanId, plan_name: plan.plan_name });
 
-      // Check for existing active quota
+      // Prefer the active quota when present, otherwise fall back to the most
+      // recent previous quota for normal renewal handling.
       const existingQuota = await client.query(
         `SELECT * FROM organization_quota_assignments
-         WHERE organization_id = $1 AND is_active = true
-         ORDER BY created_at DESC LIMIT 1`,
+         WHERE organization_id = $1
+         ORDER BY is_active DESC, created_at DESC
+         LIMIT 1`,
         [organizationId]
       );
 
@@ -333,31 +346,63 @@ const creditService = {
       expirationDate.setDate(expirationDate.getDate() + 30); // 30-day subscription
 
       if (existingQuota.rows.length > 0) {
-        // RENEWAL: Update existing row (ChatGPT model)
         const quota = existingQuota.rows[0];
         const pointsBefore = parseFloat(quota.remaining_points);
+        const queriesBefore = quota.remaining_queries != null ? Number(quota.remaining_queries) : 0;
+        const allowCarryover =
+          options.carryover_unused === true &&
+          quota.is_active === true &&
+          new Date(quota.expiration_date) >= new Date(new Date().toDateString());
+        const carryoverPoints = allowCarryover ? Math.max(pointsBefore, 0) : 0;
+        const carryoverQueries = allowCarryover ? Math.max(queriesBefore, 0) : 0;
+        const nextAssignedPointsLimit = Number(plan.points_limit || 0) + carryoverPoints;
+        const nextAssignedQueriesLimit = Number(plan.queries_limit || 0) + carryoverQueries;
+        const shouldReuseRow = quota.is_active === true;
 
-        await client.query(
-          `UPDATE organization_quota_assignments
-           SET assigned_points_limit = $1,
-               assigned_queries_limit = $2,
-               remaining_points = $3,
-               remaining_queries = $4,
-               effective_date = $5,
-               expiration_date = $6,
-               is_active = true,
-               updated_at = NOW()
-           WHERE id = $7`,
-          [
-            plan.points_limit,
-            plan.queries_limit,
-            plan.points_limit, // Reset to full
-            plan.queries_limit,
-            effectiveDate,
-            expirationDate,
-            quota.id
-          ]
-        );
+        if (shouldReuseRow) {
+          await client.query(
+            `UPDATE organization_quota_assignments
+             SET assigned_points_limit = $1,
+                 assigned_queries_limit = $2,
+                 remaining_points = $3,
+                 remaining_queries = $4,
+                 effective_date = $5,
+                 expiration_date = $6,
+                 is_active = true,
+                 updated_at = NOW()
+             WHERE id = $7`,
+            [
+              nextAssignedPointsLimit,
+              nextAssignedQueriesLimit,
+              nextAssignedPointsLimit,
+              nextAssignedQueriesLimit,
+              effectiveDate,
+              expirationDate,
+              quota.id
+            ]
+          );
+        } else {
+          const newQuotaResult = await client.query(
+            `INSERT INTO organization_quota_assignments (
+              organization_id, quota_plan_id,
+              assigned_points_limit, assigned_queries_limit,
+              remaining_points, remaining_queries,
+              effective_date, expiration_date, is_active
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+             RETURNING id`,
+            [
+              organizationId,
+              quotaPlanId,
+              nextAssignedPointsLimit,
+              nextAssignedQueriesLimit,
+              nextAssignedPointsLimit,
+              nextAssignedQueriesLimit,
+              effectiveDate,
+              expirationDate
+            ]
+          );
+          quota.id = newQuotaResult.rows[0].id;
+        }
 
         // Log renewal in ledger
         await client.query(
@@ -371,11 +416,18 @@ const creditService = {
             quota.id,
             'reset',
             pointsBefore,
-            plan.points_limit,
-            plan.points_limit - pointsBefore,
+            nextAssignedPointsLimit,
+            nextAssignedPointsLimit - pointsBefore,
             'payment',
             paymentId,
-            JSON.stringify({ action: 'renewal', quota_plan_id: quotaPlanId, original_plan_reference: originalPlanId })
+            JSON.stringify({
+              action: 'renewal',
+              quota_plan_id: quotaPlanId,
+              original_plan_reference: originalPlanId,
+              carryover_points: carryoverPoints,
+              carryover_queries: carryoverQueries,
+              carryover_applied: allowCarryover
+            })
           ]
         );
 
