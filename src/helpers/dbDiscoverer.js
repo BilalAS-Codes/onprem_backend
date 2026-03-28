@@ -113,6 +113,78 @@ async discoverTables(pool, dbType) {
     }
   },
 
+  async discoverColumnMetadata(pool, dbType, tableName) {
+    try {
+      if (dbType.toLowerCase() === 'postgresql' || dbType.toLowerCase() === 'postgres') {
+        const result = await pool.query(`
+          SELECT
+            c.column_name,
+            c.data_type,
+            c.udt_name,
+            CASE
+              WHEN t.typtype = 'e' THEN ARRAY_AGG(e.enumlabel ORDER BY e.enumsortorder)
+              ELSE NULL
+            END AS enum_values
+          FROM information_schema.columns c
+          LEFT JOIN pg_namespace n
+            ON n.nspname = c.udt_schema
+          LEFT JOIN pg_type t
+            ON t.typname = c.udt_name
+           AND t.typnamespace = n.oid
+          LEFT JOIN pg_enum e
+            ON e.enumtypid = t.oid
+          WHERE c.table_name = $1
+            AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+          GROUP BY c.column_name, c.data_type, c.udt_name, c.ordinal_position, t.typtype
+          ORDER BY c.ordinal_position
+        `, [tableName]);
+
+        return result.rows.map((row) => ({
+          column_name: row.column_name,
+          data_type: row.data_type,
+          enum_values: Array.isArray(row.enum_values)
+            ? row.enum_values.filter((value) => value !== null)
+            : []
+        }));
+      } else if (dbType.toLowerCase() === 'mysql') {
+        const [rows] = await pool.query(`
+          SELECT
+            COLUMN_NAME as column_name,
+            DATA_TYPE as data_type,
+            COLUMN_TYPE as column_type
+          FROM information_schema.columns
+          WHERE TABLE_NAME = ?
+            AND TABLE_SCHEMA = DATABASE()
+          ORDER BY ORDINAL_POSITION
+        `, [tableName]);
+
+        return rows.map((row) => {
+          const enumMatch = typeof row.column_type === 'string'
+            ? row.column_type.match(/^enum\((.*)\)$/i)
+            : null;
+
+          let enumValues = [];
+          if (enumMatch && enumMatch[1]) {
+            enumValues = enumMatch[1]
+              .split(/','/)
+              .map((value) => value.replace(/^'/, '').replace(/'$/, ''))
+              .filter(Boolean);
+          }
+
+          return {
+            column_name: row.column_name,
+            data_type: row.data_type,
+            enum_values: enumValues
+          };
+        });
+      }
+
+      return [];
+    } catch (error) {
+      throw new Error(`Failed to discover column metadata for table ${tableName}: ${error.message}`);
+    }
+  },
+
   async discoverForeignKeys(pool, dbType, tableName) {
     try {
       if (dbType.toLowerCase() === 'postgresql') {

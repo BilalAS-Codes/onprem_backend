@@ -21,6 +21,90 @@ const ensurePlanChangeTable = async () => {
   );
 };
 
+const ensureSubscriptionStateTable = async () => {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS billing_subscription_states (
+      organization_id UUID PRIMARY KEY,
+      auto_renew BOOLEAN NOT NULL DEFAULT true,
+      cancelled_at TIMESTAMP NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    )`
+  );
+};
+
+const escapePdfText = (value) => String(value ?? '')
+  .replace(/\\/g, '\\\\')
+  .replace(/\(/g, '\\(')
+  .replace(/\)/g, '\\)');
+
+const buildInvoicePdfBuffer = (invoice) => {
+  const lines = [
+    'ZeroQueries Invoice',
+    `Invoice ID: ${invoice.id}`,
+    `Plan: ${invoice.plan_name || 'N/A'}`,
+    `Amount: ${invoice.amount || 0}`,
+    `Status: ${invoice.status || 'unknown'}`,
+    `Order ID: ${invoice.razorpay_order_id || 'N/A'}`,
+    `Payment ID: ${invoice.razorpay_payment_id || 'N/A'}`,
+    `Created At: ${invoice.created_at ? new Date(invoice.created_at).toISOString() : 'N/A'}`
+  ];
+
+  const contentStream = [
+    'BT',
+    '/F1 16 Tf',
+    '50 780 Td',
+    ...lines.flatMap((line, index) => {
+      const escaped = escapePdfText(line);
+      return index === 0
+        ? [`(${escaped}) Tj`]
+        : ['0 -24 Td', `(${escaped}) Tj`];
+    }),
+    'ET'
+  ].join('\n');
+
+  const objects = [
+    '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+    '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+    '3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj',
+    '4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj',
+    `5 0 obj << /Length ${Buffer.byteLength(contentStream, 'utf8')} >> stream\n${contentStream}\nendstream endobj`
+  ];
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+
+  for (const object of objects) {
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += `${object}\n`;
+  }
+
+  const xrefOffset = Buffer.byteLength(pdf, 'utf8');
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+
+  for (let index = 1; index < offsets.length; index += 1) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+
+  pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+  return Buffer.from(pdf, 'utf8');
+};
+
+const getSubscriptionState = async (organizationId) => {
+  await ensureSubscriptionStateTable();
+  const result = await db.query(
+    `INSERT INTO billing_subscription_states (organization_id)
+     VALUES ($1)
+     ON CONFLICT (organization_id) DO UPDATE SET organization_id = EXCLUDED.organization_id
+     RETURNING *`,
+    [organizationId]
+  );
+  return result.rows[0];
+};
+
 const getPendingPlanChange = async (organizationId) => {
   await ensurePlanChangeTable();
   const res = await db.query(
@@ -104,6 +188,12 @@ const billingController = {
 
       // Get credit balance
       const creditBalance = await creditService.getBalance(organizationId);
+      const subscriptionState = await getSubscriptionState(organizationId);
+      const effectivePlanName = row.plan_name || 'Free Trial';
+      const effectivePlanPrice = Number(row.price_monthly || 0);
+      const nextBillingDate =
+        creditBalance?.expiration_date ||
+        (row.created_at ? new Date(new Date(row.created_at).getTime() + 30 * 24 * 60 * 60 * 1000) : null);
 
       const safePercent = (current, limit) => {
         if (!limit || Number(limit) <= 0) return 0;
@@ -122,36 +212,96 @@ const billingController = {
       const currentPlan = row.plan_id
         ? {
           id: row.plan_id,
-          name: row.plan_name,
-          price_monthly: row.price_monthly,
-          features: row.features,
+          name: effectivePlanName,
+          price_monthly: effectivePlanPrice,
+          price_yearly: effectivePlanPrice > 0 ? effectivePlanPrice * 12 : 0,
+          billing_cycle: 'monthly',
+          features: row.features || {},
+          limits: {
+            users: Number(row.user_limit || 0),
+            databases: Number(row.db_limit || 0),
+            queries: Number(row.query_limit || 0),
+            points: Number(creditBalance?.assigned_points_limit || 0),
+          },
           usage: {
             users: {
               current: Number(row.active_users),
-              limit: row.user_limit,
+              limit: Number(row.user_limit || 0),
               percentage: safePercent(row.active_users, row.user_limit),
             },
             databases: {
               current: Number(row.db_connections),
-              limit: row.db_limit,
+              limit: Number(row.db_limit || 0),
               percentage: safePercent(row.db_connections, row.db_limit),
             },
             queries: {
               current: Number(row.queries_this_month),
-              limit: row.query_limit,
+              limit: Number(row.query_limit || 0),
               percentage: safePercent(row.queries_this_month, row.query_limit),
+            },
+            points: {
+              current: Number(creditBalance?.assigned_points_limit || 0) - Number(creditBalance?.remaining_points || 0),
+              limit: Number(creditBalance?.assigned_points_limit || 0),
+              percentage: safePercent(
+                Number(creditBalance?.assigned_points_limit || 0) - Number(creditBalance?.remaining_points || 0),
+                Number(creditBalance?.assigned_points_limit || 0)
+              ),
             },
             credits: creditBalance // ADD CREDIT INFO
           },
+          next_billing_date: nextBillingDate,
+          auto_renew: subscriptionState?.auto_renew !== false,
+          trial_ends_at: null,
+          cancelled_at: subscriptionState?.cancelled_at || null,
           pending_change: pendingChange
             ? {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
-              effective_date: pendingChange.effective_date
+              effective_date: pendingChange.effective_date,
+              type: 'downgrade'
             }
             : null
         }
-        : null;
+        : {
+          id: 'trial',
+          name: effectivePlanName,
+          price_monthly: 0,
+          price_yearly: 0,
+          billing_cycle: 'monthly',
+          features: {},
+          limits: {
+            users: 0,
+            databases: 0,
+            queries: 0,
+            points: Number(creditBalance?.assigned_points_limit || 0),
+          },
+          usage: {
+            users: { current: Number(row.active_users || 0), limit: 0, percentage: 0 },
+            databases: { current: Number(row.db_connections || 0), limit: 0, percentage: 0 },
+            queries: { current: Number(row.queries_this_month || 0), limit: 0, percentage: 0 },
+            points: {
+              current: Number(creditBalance?.assigned_points_limit || 0) - Number(creditBalance?.remaining_points || 0),
+              limit: Number(creditBalance?.assigned_points_limit || 0),
+              percentage: safePercent(
+                Number(creditBalance?.assigned_points_limit || 0) - Number(creditBalance?.remaining_points || 0),
+                Number(creditBalance?.assigned_points_limit || 0)
+              ),
+            },
+            credits: creditBalance
+          },
+          next_billing_date: nextBillingDate,
+          auto_renew: subscriptionState?.auto_renew !== false,
+          trial_ends_at: null,
+          cancelled_at: subscriptionState?.cancelled_at || null,
+          pending_change: pendingChange
+            ? {
+              to_plan_id: pendingChange.to_plan_id,
+              to_plan_name: pendingChange.to_plan_name,
+              effective_date: pendingChange.effective_date,
+              type: 'downgrade'
+            }
+            : null
+        };
 
       res.json({
         success: true,
@@ -161,11 +311,13 @@ const billingController = {
           id: plan.id,
           name: plan.name,
           price_monthly: plan.price_monthly,
+          price_yearly: Number(plan.price_monthly || 0) * 12,
           features: plan.features,
           limits: {
             users: plan.user_limit,
             databases: plan.db_limit,
             queries: plan.query_limit,
+            points: Number(plan.query_limit || 0),
           },
           is_current: row.plan_id ? plan.id === row.plan_id : false,
         })),
@@ -191,6 +343,39 @@ const billingController = {
       }
 
       const plan = planResult.rows[0];
+
+      const existingOpenOrder = await db.query(
+        `SELECT id, razorpay_order_id, amount
+         FROM billing_transactions
+         WHERE organization_id = $1
+           AND plan_id = $2
+           AND lower(status) = 'created'
+           AND razorpay_payment_id IS NULL
+           AND razorpay_order_id IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [organizationId, plan_id]
+      );
+
+      if (existingOpenOrder.rows.length) {
+        const existing = existingOpenOrder.rows[0];
+        const orderPayload = {
+          id: existing.razorpay_order_id,
+          amount: Number(existing.amount || plan.price_monthly || 0) * 100,
+          currency: 'INR',
+          key: process.env.RAZORPAY_KEY_ID,
+        };
+
+        return res.json({
+          success: true,
+          reused: true,
+          order: orderPayload,
+          order_id: orderPayload.id,
+          amount: orderPayload.amount,
+          currency: orderPayload.currency,
+          key: process.env.RAZORPAY_KEY_ID,
+        });
+      }
 
       const order = await razorpay.orders.create({
         amount: Number(plan.price_monthly) * 100,
@@ -219,7 +404,16 @@ const billingController = {
       }
 
       // Return order details + txn id (helpful for frontend to correlate)
+      const orderPayload = {
+        id: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        key: process.env.RAZORPAY_KEY_ID,
+      };
+
       res.json({
+        success: true,
+        order: orderPayload,
         order_id: order.id,
         amount: order.amount,
         currency: order.currency,
@@ -416,6 +610,9 @@ const billingController = {
       if (status && status !== 'all') {
         params.push(status);
         whereClause += ` AND lower(bt.status) = $${params.length}`;
+      } else {
+        // "created" rows are checkout attempts, not user-facing invoices.
+        whereClause += ` AND lower(bt.status) <> 'created'`;
       }
 
       if (search) {
@@ -490,6 +687,13 @@ const billingController = {
 
       if (txn.razorpay_order_id) {
         return res.json({
+          success: true,
+          order: {
+            id: txn.razorpay_order_id,
+            amount: Number(txn.amount || txn.price_monthly || 0) * 100,
+            currency: 'INR',
+            key: process.env.RAZORPAY_KEY_ID
+          },
           order_id: txn.razorpay_order_id,
           amount: Number(txn.amount || txn.price_monthly || 0) * 100,
           currency: 'INR',
@@ -530,6 +734,13 @@ const billingController = {
       }
 
       res.json({
+        success: true,
+        order: {
+          id: order.id,
+          amount: order.amount,
+          currency: order.currency,
+          key: process.env.RAZORPAY_KEY_ID
+        },
         order_id: order.id,
         amount: order.amount,
         currency: order.currency,
@@ -542,7 +753,7 @@ const billingController = {
   },
 
   /**
-   * Download invoice (JSON attachment for now)
+   * Download invoice as a simple PDF
    */
   async downloadInvoice(req, res) {
     try {
@@ -562,14 +773,200 @@ const billingController = {
       }
 
       const invoice = txnRes.rows[0];
-      const filename = `invoice-${invoice.id}.json`;
+      const filename = `invoice-${invoice.id}.pdf`;
+      const pdfBuffer = buildInvoicePdfBuffer(invoice);
 
-      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.send(JSON.stringify(invoice, null, 2));
+      res.setHeader('Content-Length', pdfBuffer.length);
+      res.send(pdfBuffer);
     } catch (error) {
       console.error('Download invoice error:', error);
       res.status(500).json({ error: 'Failed to download invoice' });
+    }
+  },
+
+  async getPayments(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const pageSize = Math.min(50, Math.max(1, parseInt(req.query.page_size, 10) || 10));
+      const search = (req.query.search || '').toString().trim();
+      const params = [organizationId];
+      let whereClause = `bt.organization_id = $1 AND bt.razorpay_payment_id IS NOT NULL`;
+
+      if (search) {
+        params.push(`%${search}%`);
+        whereClause += ` AND (
+          p.name ILIKE $${params.length}
+          OR bt.razorpay_order_id ILIKE $${params.length}
+          OR bt.razorpay_payment_id ILIKE $${params.length}
+        )`;
+      }
+
+      const baseFrom = `FROM billing_transactions bt
+                        LEFT JOIN plans p ON bt.plan_id = p.id`;
+      const countRes = await db.query(`SELECT COUNT(*) ${baseFrom} WHERE ${whereClause}`, params);
+      const offset = (page - 1) * pageSize;
+      const dataRes = await db.query(
+        `SELECT
+           bt.id,
+           bt.razorpay_payment_id as transaction_id,
+           bt.id as invoice_id,
+           ('INV-' || bt.id) as invoice_number,
+           COALESCE(p.name, 'Plan') as plan_name,
+           bt.amount,
+           CASE WHEN lower(bt.status) IN ('paid', 'completed') THEN 'completed' ELSE lower(bt.status) END as status,
+           'card' as payment_method,
+           bt.razorpay_order_id,
+           bt.razorpay_payment_id,
+           bt.created_at,
+           NULL::text as refund_status,
+           NULL::numeric as refund_amount
+         ${baseFrom}
+         WHERE ${whereClause}
+         ORDER BY bt.id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, pageSize, offset]
+      );
+
+      res.json({
+        success: true,
+        payments: dataRes.rows,
+        pagination: {
+          page,
+          page_size: pageSize,
+          total: Number(countRes.rows[0]?.count || 0)
+        }
+      });
+    } catch (error) {
+      console.error('Get payments error:', error);
+      res.status(500).json({ error: 'Failed to fetch payments' });
+    }
+  },
+
+  async getPaymentMethods(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const latestPaid = await db.query(
+        `SELECT razorpay_payment_id, razorpay_order_id, created_at
+         FROM billing_transactions
+         WHERE organization_id = $1
+           AND razorpay_payment_id IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [organizationId]
+      );
+
+      const methods = latestPaid.rows.length
+        ? [{
+            id: latestPaid.rows[0].razorpay_payment_id,
+            type: 'card',
+            is_default: true,
+            last4: '****',
+            card_brand: 'Card',
+            created_at: latestPaid.rows[0].created_at
+          }]
+        : [];
+
+      res.json({ success: true, methods });
+    } catch (error) {
+      console.error('Get payment methods error:', error);
+      res.status(500).json({ error: 'Failed to fetch payment methods' });
+    }
+  },
+
+  async getUsageHistory(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const regclassRes = await db.query(
+        `SELECT to_regclass('public.usage_tracking') AS usage_tracking,
+                to_regclass('public.usage_tracker') AS usage_tracker,
+                to_regclass('public.usage_traking') AS usage_traking`
+      );
+      const row = regclassRes.rows[0] || {};
+      let history = [];
+
+      if (row.usage_tracking) {
+        const result = await db.query(
+          `SELECT month, query_count AS queries, total_points_used AS points
+           FROM usage_tracking
+           WHERE organization_id = $1
+           ORDER BY month DESC
+           LIMIT 12`,
+          [organizationId]
+        );
+        history = result.rows;
+      } else if (row.usage_tracker) {
+        const result = await db.query(
+          `SELECT month, query_count AS queries, 0::numeric AS points
+           FROM usage_tracker
+           WHERE organization_id = $1
+           ORDER BY month DESC
+           LIMIT 12`,
+          [organizationId]
+        );
+        history = result.rows;
+      } else if (row.usage_traking) {
+        const result = await db.query(
+          `SELECT month, query_count AS queries, total_points_used AS points
+           FROM usage_traking
+           WHERE organization_id = $1
+           ORDER BY month DESC
+           LIMIT 12`,
+          [organizationId]
+        );
+        history = result.rows;
+      }
+
+      res.json({
+        success: true,
+        history: history.map((item) => ({
+          month: item.month,
+          queries: Number(item.queries || 0),
+          points: Number(item.points || 0),
+          cost: 0
+        }))
+      });
+    } catch (error) {
+      console.error('Get usage history error:', error);
+      res.status(500).json({ error: 'Failed to fetch usage history' });
+    }
+  },
+
+  async cancelSubscription(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      await ensureSubscriptionStateTable();
+      await db.query(
+        `INSERT INTO billing_subscription_states (organization_id, auto_renew, cancelled_at)
+         VALUES ($1, false, NOW())
+         ON CONFLICT (organization_id)
+         DO UPDATE SET auto_renew = false, cancelled_at = NOW(), updated_at = NOW()`,
+        [organizationId]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Cancel subscription error:', error);
+      res.status(500).json({ error: 'Failed to cancel subscription' });
+    }
+  },
+
+  async reactivateSubscription(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      await ensureSubscriptionStateTable();
+      await db.query(
+        `INSERT INTO billing_subscription_states (organization_id, auto_renew, cancelled_at)
+         VALUES ($1, true, NULL)
+         ON CONFLICT (organization_id)
+         DO UPDATE SET auto_renew = true, cancelled_at = NULL, updated_at = NOW()`,
+        [organizationId]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Reactivate subscription error:', error);
+      res.status(500).json({ error: 'Failed to reactivate subscription' });
     }
   },
 

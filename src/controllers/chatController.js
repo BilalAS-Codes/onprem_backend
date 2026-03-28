@@ -155,6 +155,33 @@ const chatController = {
         return res.status(404).json({ error: 'Conversation not found or has been deleted' });
       }
 
+      const normalizedAnalysisData = analysis_data ? JSON.stringify(analysis_data) : null;
+      const normalizedSuggestions = suggestions ? JSON.stringify(suggestions) : null;
+
+      const latestMessageResult = await db.query(
+        `SELECT *
+         FROM chat_messages
+         WHERE conversation_id = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 10`,
+        [conversation_id]
+      );
+
+      const duplicateMessage = latestMessageResult.rows.find((existingMessage) =>
+        existingMessage.role === role &&
+        String(existingMessage.content || '') === String(content || '') &&
+        JSON.stringify(existingMessage.analysis_data || null) === JSON.stringify(analysis_data || null) &&
+        JSON.stringify(existingMessage.suggestions || null) === JSON.stringify(suggestions || null) &&
+        Boolean(existingMessage.is_error) === Boolean(is_error)
+      );
+      if (duplicateMessage) {
+        return res.status(200).json({
+          success: true,
+          deduped: true,
+          message: duplicateMessage
+        });
+      }
+
       // Insert message
       const messageResult = await db.query(
         `INSERT INTO chat_messages (
@@ -166,8 +193,8 @@ const chatController = {
           conversation_id,
           role,
           content,
-          analysis_data ? JSON.stringify(analysis_data) : null,
-          suggestions ? JSON.stringify(suggestions) : null,
+          normalizedAnalysisData,
+          normalizedSuggestions,
           is_error,
           error_message
         ]

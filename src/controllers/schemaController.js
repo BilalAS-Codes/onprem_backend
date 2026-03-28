@@ -1,10 +1,14 @@
 const db = require('../config/database');
+const dbDiscoverer = require('../helpers/dbDiscoverer');
+const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
 
 const schemaController = {
   async getTables(req, res) {
   try {
     const { connectionId } = req.params;
     const organizationId = req.user.organization_id;
+
+    await ensureSchemaMetadataStorage(db);
 
     // Validate connectionId is a valid UUID format
     if (!connectionId || typeof connectionId !== 'string' || connectionId === 'null') {
@@ -23,13 +27,35 @@ const schemaController = {
 
     // Get tables from YOUR semantic_tables table (which now has the actual schema)
     const result = await db.query(
-      `SELECT st.*, 
-              COUNT(sc.id) as column_count,
-              SUM(CASE WHEN sc.is_enabled = true THEN 1 ELSE 0 END) as enabled_columns
+      `SELECT
+          st.*,
+          (
+            SELECT COUNT(*)
+            FROM semantic_columns sc
+            WHERE sc.semantic_table_id = st.id
+          ) AS column_count,
+          (
+            SELECT COUNT(*)
+            FROM semantic_columns sc
+            WHERE sc.semantic_table_id = st.id
+              AND sc.is_enabled = true
+          ) AS enabled_columns,
+          (
+            SELECT COUNT(*)
+            FROM semantic_columns sc
+            WHERE sc.semantic_table_id = st.id
+              AND sc.enum_values IS NOT NULL
+              AND jsonb_typeof(sc.enum_values) = 'array'
+              AND jsonb_array_length(sc.enum_values) > 0
+          ) AS enum_column_count,
+          (
+            SELECT COUNT(*)
+            FROM semantic_relationships sr
+            WHERE sr.connection_id = st.connection_id
+              AND sr.source_table = st.table_name
+          ) AS relationship_count
        FROM semantic_tables st
-       LEFT JOIN semantic_columns sc ON st.id = sc.semantic_table_id
        WHERE st.connection_id = $1 AND st.is_enabled = true
-       GROUP BY st.id
        ORDER BY st.table_name`,
       [connectionId]
     );
@@ -47,6 +73,8 @@ const schemaController = {
   try {
     const { connectionId, tableName } = req.params;
     const organizationId = req.user.organization_id;
+
+    await ensureSchemaMetadataStorage(db);
 
     // Verify connection and fetch config
     const connectionResult = await db.query(
@@ -85,39 +113,99 @@ const schemaController = {
       [semanticTableId]
     );
 
-    // Enrich with foreign key info from source database
-    let foreignKeyMap = new Map();
-    try {
-      const dbDiscoverer = require('../helpers/dbDiscoverer');
-      const pool = await dbDiscoverer.getConnectionPool(dbConfig);
+    let liveEnumValueMap = new Map();
+    if (result.rows.some((col) => !Array.isArray(col.enum_values) || col.enum_values.length === 0)) {
       try {
-        const foreignKeys = await dbDiscoverer.discoverForeignKeys(
-          pool,
-          dbConfig.db_type,
-          tableName
-        );
-        foreignKeyMap = new Map(
-          foreignKeys.map((fk) => [String(fk.column_name), fk])
-        );
-      } finally {
-        await pool.end();
+        const pool = await dbDiscoverer.getConnectionPool(dbConfig);
+        try {
+          const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
+            pool,
+            dbConfig.db_type,
+            tableName
+          );
+          liveEnumValueMap = new Map(
+            columnMetadata.map((column) => [
+              String(column.column_name),
+              Array.isArray(column.enum_values) ? column.enum_values : []
+            ])
+          );
+        } finally {
+          await pool.end();
+        }
+      } catch (enumError) {
+        console.warn('Live enum metadata discovery failed:', enumError.message);
       }
-    } catch (fkError) {
-      console.warn('Foreign key discovery failed:', fkError.message);
     }
+
+    let relationships = [];
+    try {
+      const relationshipResult = await db.query(
+        `SELECT
+            source_table,
+            source_column,
+            target_table,
+            target_column,
+            relation_type
+         FROM semantic_relationships
+         WHERE connection_id = $1
+           AND (source_table = $2 OR target_table = $2)
+         ORDER BY source_table, source_column, target_table, target_column`,
+        [connectionId, tableName]
+      );
+      relationships = relationshipResult.rows;
+    } catch (fkError) {
+      console.warn('Stored relationship lookup failed:', fkError.message);
+    }
+
+    if (relationships.length === 0) {
+      try {
+        const pool = await dbDiscoverer.getConnectionPool(dbConfig);
+        try {
+          const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+            pool,
+            dbConfig.db_type,
+            tableName
+          );
+          relationships = foreignKeys.map((fk) => ({
+            source_table: tableName,
+            source_column: String(fk.column_name),
+            target_table: fk.foreign_table,
+            target_column: fk.foreign_column,
+            relation_type: 'foreign_key'
+          }));
+        } finally {
+          await pool.end();
+        }
+      } catch (fkError) {
+        console.warn('Foreign key discovery failed:', fkError.message);
+      }
+    }
+
+    const foreignKeyMap = new Map(
+      relationships
+        .filter((relationship) => relationship.source_table === tableName)
+        .map((relationship) => [String(relationship.source_column), relationship])
+    );
 
     const columns = result.rows.map((col) => {
       const fk = foreignKeyMap.get(col.column_name);
+      const enumValues =
+        Array.isArray(col.enum_values) && col.enum_values.length > 0
+          ? col.enum_values
+          : (liveEnumValueMap.get(String(col.column_name)) || []);
       return {
         ...col,
-        foreign_table: fk ? fk.foreign_table : null,
-        foreign_column: fk ? fk.foreign_column : null
+        enum_values: enumValues,
+        foreign_table: fk ? fk.target_table : null,
+        foreign_column: fk ? fk.target_column : null,
+        relation_type: fk ? fk.relation_type : null
       };
     });
 
     res.json({
       success: true,
-      columns
+      columns,
+      relationships
     });
   } catch (error) {
     console.error('Get columns error:', error);
@@ -167,6 +255,8 @@ const schemaController = {
 
   async createColumnMapping(req, res) {
     try {
+      await ensureSchemaMetadataStorage(db);
+
       const {
         semantic_table_id,
         column_name,
@@ -174,6 +264,7 @@ const schemaController = {
         data_type,
         is_nullable,
         default_value,
+        enum_values = [],
         department_access = 'all',
         is_enabled = true
       } = req.body;
@@ -196,19 +287,23 @@ const schemaController = {
       const result = await db.query(
         `INSERT INTO semantic_columns (
           semantic_table_id, column_name, business_name, data_type,
-          is_nullable, default_value, department_access, is_enabled
+          is_nullable, default_value, enum_values, department_access, is_enabled
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
         ON CONFLICT (semantic_table_id, column_name) 
         DO UPDATE SET 
           business_name = EXCLUDED.business_name,
+          data_type = COALESCE(EXCLUDED.data_type, semantic_columns.data_type),
+          is_nullable = COALESCE(EXCLUDED.is_nullable, semantic_columns.is_nullable),
+          default_value = COALESCE(EXCLUDED.default_value, semantic_columns.default_value),
+          enum_values = COALESCE(EXCLUDED.enum_values, semantic_columns.enum_values),
           department_access = EXCLUDED.department_access,
           is_enabled = EXCLUDED.is_enabled,
           updated_at = CURRENT_TIMESTAMP
         RETURNING *`,
         [
           semantic_table_id, column_name, business_name, data_type,
-          is_nullable, default_value, department_access, is_enabled
+          is_nullable, default_value, JSON.stringify(enum_values), department_access, is_enabled
         ]
       );
 
@@ -287,6 +382,7 @@ async discoverAndSeedSchema(req, res) {
     } = req.body;
 
     console.log(`Starting schema discovery for connection: ${connectionId}`);
+    await ensureSchemaMetadataStorage(db);
 
     // Get database connection details
     const connectionResult = await db.query(
@@ -300,9 +396,6 @@ async discoverAndSeedSchema(req, res) {
     }
 
     const dbConfig = connectionResult.rows[0];
-
-    // Import the discoverer
-    const dbDiscoverer = require('../helpers/dbDiscoverer');
 
     // Connect to the external database (RDS)
     const pool = await dbDiscoverer.getConnectionPool(dbConfig);
@@ -319,6 +412,11 @@ async discoverAndSeedSchema(req, res) {
     // First, let's clear existing data if override is true
     if (override_existing) {
       try {
+        await db.query(
+          `DELETE FROM semantic_relationships WHERE connection_id = $1`,
+          [connectionId]
+        );
+
         await db.query(
           `DELETE FROM semantic_columns WHERE semantic_table_id IN (
             SELECT id FROM semantic_tables WHERE connection_id = $1
@@ -385,96 +483,127 @@ async discoverAndSeedSchema(req, res) {
             );
           }
 
-          if (result.rows[0]) {
-            const tableRecord = result.rows[0];
-            seededTables.push(tableRecord);
+          const tableRecord =
+            result.rows[0] ||
+            (
+              await db.query(
+                `SELECT *
+                 FROM semantic_tables
+                 WHERE connection_id = $1::uuid AND table_name = $2::varchar(255)
+                 LIMIT 1`,
+                [connectionId, tableName]
+              )
+            ).rows[0];
 
-            // Discover and seed columns for this table if requested
-            if (seed_columns) {
-              const tableId = tableRecord.id;
-              const columns = await dbDiscoverer.discoverColumns(
-                pool, 
-                dbConfig.db_type, 
+          if (!tableRecord) {
+            console.log(`Table ${tableName} already exists or not inserted`);
+            continue;
+          }
+
+          if (result.rows[0]) {
+            seededTables.push(tableRecord);
+          }
+
+          if (seed_columns) {
+            const tableId = tableRecord.id;
+            const columns = await dbDiscoverer.discoverColumns(
+              pool,
+              dbConfig.db_type,
+              tableName
+            );
+            const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
+              pool,
+              dbConfig.db_type,
+              tableName
+            );
+            const columnMetadataMap = new Map(
+              columnMetadata.map((column) => [String(column.column_name), column])
+            );
+
+            console.log(`Discovered ${columns.length} columns for table: ${tableName}`);
+
+            for (const column of columns) {
+              try {
+                const columnName = String(column.column_name || '').trim();
+                const metadata = columnMetadataMap.get(columnName);
+                const dataType = String(metadata?.data_type || column.data_type || '').trim();
+                const isNullable = column.is_nullable === 'YES';
+                const defaultValue =
+                  column.default_value !== null && column.default_value !== undefined
+                    ? String(column.default_value)
+                    : null;
+                const enumValues = Array.isArray(metadata?.enum_values)
+                  ? metadata.enum_values.filter((value) => value != null)
+                  : [];
+
+                const columnResult = await db.query(
+                  `INSERT INTO semantic_columns (
+                    semantic_table_id, column_name, business_name,
+                    data_type, is_nullable, default_value, enum_values, is_enabled
+                  )
+                  VALUES (
+                    $1::uuid, $2::varchar(255), $3::varchar(255),
+                    $4::varchar(100), $5::boolean, $6::text, $7::jsonb, true
+                  )
+                  ON CONFLICT (semantic_table_id, column_name)
+                  DO UPDATE SET
+                    data_type = EXCLUDED.data_type,
+                    is_nullable = EXCLUDED.is_nullable,
+                    default_value = EXCLUDED.default_value,
+                    enum_values = EXCLUDED.enum_values,
+                    updated_at = CURRENT_TIMESTAMP
+                  RETURNING *`,
+                  [
+                    tableId,
+                    columnName,
+                    columnName,
+                    dataType,
+                    isNullable,
+                    defaultValue,
+                    JSON.stringify(enumValues)
+                  ]
+                );
+
+                if (columnResult.rows[0] && result.rows[0]) {
+                  seededColumns.push(columnResult.rows[0]);
+                }
+              } catch (columnError) {
+                const errorMsg = `Error seeding column ${column.column_name}: ${columnError.message}`;
+                console.error(errorMsg);
+                errors.push(errorMsg);
+              }
+            }
+
+            try {
+              const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+                pool,
+                dbConfig.db_type,
                 tableName
               );
 
-              console.log(`Discovered ${columns.length} columns for table: ${tableName}`);
-
-              for (const column of columns) {
-                try {
-                  // Ensure column values are properly typed
-                  const columnName = String(column.column_name || '').trim();
-                  const dataType = String(column.data_type || '').trim();
-                  const isNullable = column.is_nullable === 'YES';
-                  const defaultValue = column.default_value !== null && 
-                                      column.default_value !== undefined ? 
-                    String(column.default_value) : null;
-
-                  let columnResult;
-
-                  if (override_existing) {
-                    // Upsert column
-                    columnResult = await db.query(
-                      `INSERT INTO semantic_columns (
-                        semantic_table_id, column_name, business_name,
-                        data_type, is_nullable, default_value, is_enabled
-                      )
-                      VALUES ($1::uuid, $2::varchar(255), $3::varchar(255), 
-                              $4::varchar(100), $5::boolean, $6::text, true)
-                      ON CONFLICT (semantic_table_id, column_name) 
-                      DO UPDATE SET 
-                        data_type = EXCLUDED.data_type,
-                        is_nullable = EXCLUDED.is_nullable,
-                        default_value = EXCLUDED.default_value,
-                        updated_at = CURRENT_TIMESTAMP
-                      RETURNING *`,
-                      [
-                        tableId,
-                        columnName,
-                        columnName, // business_name same as column_name initially
-                        dataType,
-                        isNullable,
-                        defaultValue
-                      ]
-                    );
-                  } else {
-                    // Insert only if not exists
-                    columnResult = await db.query(
-                      `INSERT INTO semantic_columns (
-                        semantic_table_id, column_name, business_name,
-                        data_type, is_nullable, default_value, is_enabled
-                      )
-                      SELECT $1::uuid, $2::varchar(255), $3::varchar(255), 
-                             $4::varchar(100), $5::boolean, $6::text, true
-                      WHERE NOT EXISTS (
-                        SELECT 1 FROM semantic_columns 
-                        WHERE semantic_table_id = $1::uuid AND column_name = $2::varchar(255)
-                      )
-                      RETURNING *`,
-                      [
-                        tableId,
-                        columnName,
-                        columnName,
-                        dataType,
-                        isNullable,
-                        defaultValue
-                      ]
-                    );
-                  }
-
-                  if (columnResult.rows[0]) {
-                    seededColumns.push(columnResult.rows[0]);
-                  }
-                } catch (columnError) {
-                  const errorMsg = `Error seeding column ${column.column_name}: ${columnError.message}`;
-                  console.error(errorMsg);
-                  errors.push(errorMsg);
-                  // Continue with other columns
-                }
+              for (const foreignKey of foreignKeys) {
+                await db.query(
+                  `INSERT INTO semantic_relationships (
+                    connection_id, source_table, source_column, target_table, target_column, relation_type
+                  )
+                  VALUES ($1::uuid, $2::varchar(255), $3::varchar(255), $4::varchar(255), $5::varchar(255), $6::varchar(50))
+                  ON CONFLICT (connection_id, source_table, source_column, target_table, target_column, relation_type)
+                  DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+                  [
+                    connectionId,
+                    tableName,
+                    String(foreignKey.column_name || '').trim(),
+                    String(foreignKey.foreign_table || '').trim(),
+                    String(foreignKey.foreign_column || '').trim(),
+                    'foreign_key'
+                  ]
+                );
               }
+            } catch (relationshipError) {
+              const errorMsg = `Error seeding relationships for ${tableName}: ${relationshipError.message}`;
+              console.error(errorMsg);
+              errors.push(errorMsg);
             }
-          } else {
-            console.log(`Table ${tableName} already exists or not inserted`);
           }
         } catch (tableError) {
           const errorMsg = `Error seeding table ${table.table_name}: ${tableError.message}`;
@@ -488,6 +617,13 @@ async discoverAndSeedSchema(req, res) {
     // Release the connection pool to external database
     await pool.end();
 
+    const relationshipCountResult = await db.query(
+      `SELECT COUNT(*)::int AS count
+       FROM semantic_relationships
+       WHERE connection_id = $1`,
+      [connectionId]
+    );
+
     res.status(200).json({
       success: true,
       message: 'Schema discovery and seeding completed',
@@ -495,6 +631,7 @@ async discoverAndSeedSchema(req, res) {
         total_tables_discovered: tables.length,
         tables_seeded: seededTables.length,
         columns_seeded: seededColumns.length,
+        relationships_seeded: relationshipCountResult.rows[0]?.count || 0,
         connection: {
           id: dbConfig.id,
           database_name: dbConfig.database_name,
@@ -601,6 +738,8 @@ async debugTableInsert(req, res) {
 
 async bulkUpdateColumnMappings(req, res) {
   try {
+    await ensureSchemaMetadataStorage(db);
+
     const { semantic_table_id, columns } = req.body;
     const organizationId = req.user.organization_id;
 
@@ -636,6 +775,7 @@ async bulkUpdateColumnMappings(req, res) {
           data_type,
           is_nullable,
           default_value,
+          enum_values = [],
           department_access = 'all',
           is_enabled = true
         } = column;
@@ -652,15 +792,16 @@ async bulkUpdateColumnMappings(req, res) {
         const result = await db.query(
           `INSERT INTO semantic_columns (
             semantic_table_id, column_name, business_name, data_type,
-            is_nullable, default_value, department_access, is_enabled
+            is_nullable, default_value, enum_values, department_access, is_enabled
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
           ON CONFLICT (semantic_table_id, column_name) 
           DO UPDATE SET 
             business_name = COALESCE(EXCLUDED.business_name, semantic_columns.business_name),
             data_type = COALESCE(EXCLUDED.data_type, semantic_columns.data_type),
             is_nullable = COALESCE(EXCLUDED.is_nullable, semantic_columns.is_nullable),
             default_value = COALESCE(EXCLUDED.default_value, semantic_columns.default_value),
+            enum_values = COALESCE(EXCLUDED.enum_values, semantic_columns.enum_values),
             department_access = COALESCE(EXCLUDED.department_access, semantic_columns.department_access),
             is_enabled = COALESCE(EXCLUDED.is_enabled, semantic_columns.is_enabled),
             updated_at = CURRENT_TIMESTAMP
@@ -672,6 +813,7 @@ async bulkUpdateColumnMappings(req, res) {
             data_type || 'varchar',
             is_nullable !== undefined ? is_nullable : true,
             default_value,
+            JSON.stringify(Array.isArray(enum_values) ? enum_values : []),
             department_access,
             is_enabled
           ]

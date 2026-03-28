@@ -7,9 +7,11 @@ const { checkCredits } = require('../middleware/creditCheck');
 const creditService = require('../services/creditService');
 const jwt = require('jsonwebtoken');
 const { jwtConfig } = require('../config/jwt');
+const dbDiscoverer = require('../helpers/dbDiscoverer');
 
 // In-memory storage for Server-Sent Events clients keyed by conversation ID
 const sseClients = {};
+const taskPollers = new Map();
 
 // Helper to authenticate token supplied via query param (for SSE)
 // also accepts Authorization header if EventSource client can provide it.
@@ -105,6 +107,143 @@ function sendSse(conversationId, event, data) {
     });
 }
 
+function normalizeTaskUpdatePayload(payload, fallbackTaskId = null, fallbackConversationId = null) {
+    const base = payload?.success && payload?.data ? payload.data : payload;
+    const details = base?.details || payload?.details;
+    const result = base?.result || details?.result || payload?.result || payload?.data?.result;
+
+    return {
+        ...payload,
+        ...(base && base !== payload ? base : {}),
+        task_id: base?.task_id || payload?.task_id || payload?.data?.task_id || fallbackTaskId,
+        conversation_id: base?.conversation_id || payload?.conversation_id || fallbackConversationId,
+        details: result && details ? { ...details, result } : details,
+        result: result || undefined
+    };
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function redactPayloadForLog(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+
+    return {
+        ...payload,
+        db_config: payload.db_config
+            ? {
+                ...payload.db_config,
+                connection_string: payload.db_config.connection_string ? '[REDACTED]' : payload.db_config.connection_string,
+                password: payload.db_config.password ? '[REDACTED]' : payload.db_config.password
+            }
+            : payload.db_config
+    };
+}
+
+async function logAnalysisApiCall({
+    organizationId = null,
+    userId = null,
+    conversationId = null,
+    endpoint,
+    question = null,
+    requestPayload = null,
+    responsePayload = null,
+    errorPayload = null,
+    statusCode = null,
+    durationMs = null,
+    success = false
+}) {
+    try {
+        const responseData = responsePayload && typeof responsePayload === 'object' ? responsePayload : null;
+        const errorData = errorPayload && typeof errorPayload === 'object' ? errorPayload : null;
+
+        await db.query(
+            `INSERT INTO analysis_api_logs (
+                organization_id,
+                user_id,
+                conversation_id,
+                service_name,
+                endpoint,
+                method,
+                question,
+                request_id,
+                task_id,
+                status_code,
+                success,
+                duration_ms,
+                request_payload,
+                response_payload,
+                error_payload
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+            )`,
+            [
+                organizationId,
+                userId,
+                conversationId,
+                'external-ai',
+                endpoint,
+                'POST',
+                question,
+                responseData?.request_id || errorData?.request_id || null,
+                responseData?.task_id || responseData?.id || errorData?.task_id || null,
+                statusCode,
+                success,
+                durationMs,
+                requestPayload ? JSON.stringify(redactPayloadForLog(requestPayload)) : null,
+                responseData ? JSON.stringify(responseData) : null,
+                errorData ? JSON.stringify(errorData) : null
+            ]
+        );
+    } catch (logError) {
+        console.error('[ANALYSIS API LOG] Failed to persist log:', logError.message);
+    }
+}
+
+async function updateAnalysisApiLogByTaskId({
+    taskId,
+    responsePayload = null,
+    errorPayload = null,
+    success = false,
+    conversationId = null
+}) {
+    if (!taskId) return;
+
+    try {
+        const responseData = responsePayload && typeof responsePayload === 'object' ? responsePayload : null;
+        const errorData = errorPayload && typeof errorPayload === 'object' ? errorPayload : null;
+
+        await db.query(
+            `UPDATE analysis_api_logs
+             SET conversation_id = COALESCE($1, conversation_id),
+                 request_id = COALESCE($2, request_id),
+                 response_payload = COALESCE($3, response_payload),
+                 error_payload = COALESCE($4, error_payload),
+                 success = $5,
+                 status_code = COALESCE($6, status_code)
+             WHERE id = (
+                 SELECT id
+                 FROM analysis_api_logs
+                 WHERE task_id = $7
+                 ORDER BY created_at DESC
+                 LIMIT 1
+             )`,
+            [
+                conversationId,
+                responseData?.request_id || errorData?.request_id || null,
+                responseData ? JSON.stringify(responseData) : null,
+                errorData ? JSON.stringify(errorData) : null,
+                success,
+                responseData || errorData ? 200 : null,
+                taskId
+            ]
+        );
+    } catch (logError) {
+        console.error('[ANALYSIS API LOG] Failed to update log:', logError.message);
+    }
+}
+
 
 /**
  * Helper to construct a Postgres connection string
@@ -115,13 +254,169 @@ function constructConnectionString(conn) {
     return `postgresql://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
 }
 
+function formatSchemaInfoEntry(columnName, dataType, enumValues = []) {
+    const safeColumnName = String(columnName || '').trim();
+    const rawDataType = String(dataType || 'text').trim();
+    const safeDataType = Array.isArray(enumValues) && enumValues.length > 0 && rawDataType.toLowerCase() === 'user-defined'
+        ? 'varchar'
+        : rawDataType;
+    let entry = `${safeColumnName}(${safeDataType})`;
+
+    if (Array.isArray(enumValues) && enumValues.length > 0) {
+        entry += `:${JSON.stringify({ enum_values: enumValues })}`;
+    }
+
+    return entry;
+}
+
+async function buildSemanticContext(conn) {
+    const schemaResult = await db.query(
+        `SELECT
+            st.table_name,
+            st.is_enabled as table_enabled,
+            sc.column_name,
+            sc.data_type,
+            sc.enum_values,
+            sc.is_enabled as column_enabled
+         FROM semantic_tables st
+         JOIN semantic_columns sc ON st.id = sc.semantic_table_id
+         WHERE st.connection_id = $1`,
+        [conn.id]
+    );
+
+    const schemaInfo = {};
+    const allowedTables = [];
+    const disallowedTables = [];
+    const allowedColumns = {};
+    const restrictedColumns = {};
+    const tableColumnTypes = {};
+
+    schemaResult.rows.forEach((row) => {
+        const tbl = row.table_name;
+        const col = row.column_name;
+        const dataType = row.data_type;
+
+        if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
+        if (!tableColumnTypes[tbl]) tableColumnTypes[tbl] = {};
+        tableColumnTypes[tbl][col] = dataType;
+
+        schemaInfo[tbl].push(
+            formatSchemaInfoEntry(
+                col,
+                dataType,
+                Array.isArray(row.enum_values) ? row.enum_values : []
+            )
+        );
+
+        if (row.table_enabled) {
+            if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
+
+            if (row.column_enabled) {
+                if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
+                allowedColumns[tbl].push(col);
+            } else {
+                if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
+                restrictedColumns[tbl].push(col);
+            }
+        } else if (!disallowedTables.includes(tbl)) {
+            disallowedTables.push(tbl);
+        }
+    });
+
+    const relationships = [];
+
+    try {
+        const storedRelationshipsResult = await db.query(
+            `SELECT source_table, source_column, target_table, target_column
+             FROM semantic_relationships
+             WHERE connection_id = $1
+             ORDER BY source_table, source_column, target_table, target_column`,
+            [conn.id]
+        );
+
+        storedRelationshipsResult.rows.forEach((relationship) => {
+            if (!relationship?.source_table || !relationship?.source_column || !relationship?.target_table || !relationship?.target_column) {
+                return;
+            }
+
+            relationships.push({
+                from_field: `${relationship.source_table}.${relationship.source_column}`,
+                to_field: `${relationship.target_table}.${relationship.target_column}`
+            });
+        });
+    } catch (storedRelationshipError) {
+        console.warn('[ANALYSIS] Stored relationship lookup failed:', storedRelationshipError.message);
+    }
+
+    try {
+        const pool = await dbDiscoverer.getConnectionPool(conn);
+        try {
+            for (const tableName of Object.keys(schemaInfo)) {
+                const hasStoredEnumMetadata = schemaInfo[tableName]?.some((entry) => entry.includes('"enum_values"'));
+
+                if (!hasStoredEnumMetadata) {
+                    const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
+                        pool,
+                        conn.db_type,
+                        tableName
+                    );
+
+                    if (Array.isArray(columnMetadata) && columnMetadata.length > 0) {
+                        schemaInfo[tableName] = columnMetadata.map((column) => {
+                            const fallbackType = tableColumnTypes[tableName]?.[column.column_name];
+                            return formatSchemaInfoEntry(
+                                column.column_name,
+                                column.data_type || fallbackType,
+                                column.enum_values
+                            );
+                        });
+                    }
+                }
+            }
+
+            if (relationships.length === 0) {
+                for (const tableName of allowedTables) {
+                    const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+                        pool,
+                        conn.db_type,
+                        tableName
+                    );
+
+                    foreignKeys.forEach((fk) => {
+                        if (!fk?.column_name || !fk?.foreign_table || !fk?.foreign_column) return;
+
+                        relationships.push({
+                            from_field: `${tableName}.${fk.column_name}`,
+                            to_field: `${fk.foreign_table}.${fk.foreign_column}`
+                        });
+                    });
+                }
+            }
+        } finally {
+            await pool.end();
+        }
+    } catch (relationshipError) {
+        console.warn('[ANALYSIS] Relationship discovery failed:', relationshipError.message);
+    }
+
+    return {
+        schemaInfo,
+        allowedTables,
+        disallowedTables,
+        allowedColumns,
+        restrictedColumns,
+        relationships
+    };
+}
+
 /**
  * POST /api/v1/analyze
  * Proxies the request to the external AI Analysis service with full context
  */
 router.post('/analyze', authenticateToken, async (req, res) => {
     const { question, max_rows = 100 } = req.body;
-    const { organization_id, role } = req.user;
+    const { organization_id, role, id: user_id } = req.user;
+    const startedAt = Date.now();
 
     console.log('📨 [ANALYZE] Received request for question:', question);
 
@@ -142,44 +437,14 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         const conn = connectionResult.rows[0];
 
-        // 2. Fetch schema info (Tables & Columns)
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-
-            // Build schema_info map
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-
-            // Access Policy logic
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         console.log(conn, 'this is conn')
         // 3. Construct Payload for External API
@@ -192,7 +457,8 @@ router.post('/analyze', authenticateToken, async (req, res) => {
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -212,7 +478,14 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         };
 
         console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
-        console.dir(externalPayload, { depth: null, maxArrayLength: null });
+        console.dir({
+            ...externalPayload,
+            db_config: {
+                ...externalPayload.db_config,
+                connection_string: '[REDACTED]',
+                password: '[REDACTED]'
+            }
+        }, { depth: null, maxArrayLength: null });
 
         // 4. Call External Digital Ocean API
         // Authorization header as provided in the user's example
@@ -231,6 +504,18 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         // 5. Return the result from the external API to our frontend
         console.log('✅ [ANALYZE] Returning analysis results to frontend');
 
+        await logAnalysisApiCall({
+            organizationId: organization_id,
+            userId: user_id,
+            endpoint: '/api/v1/analyze',
+            question,
+            requestPayload: externalPayload,
+            responsePayload: response.data,
+            statusCode: response.status,
+            durationMs: Date.now() - startedAt,
+            success: true
+        });
+
         res.json(response.data);
 
     } catch (error) {
@@ -238,6 +523,18 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'External analysis service failed' };
+
+        await logAnalysisApiCall({
+            organizationId: organization_id,
+            userId: user_id,
+            endpoint: '/api/v1/analyze',
+            question,
+            requestPayload: req.body,
+            errorPayload: errorData,
+            statusCode,
+            durationMs: Date.now() - startedAt,
+            success: false
+        });
 
         res.status(statusCode).json({
             success: false,
@@ -274,44 +571,14 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
 
         const conn = connectionResult.rows[0];
 
-        // 2. Fetch schema info (Tables & Columns)
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-
-            // Build schema_info map
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-
-            // Access Policy logic
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         // 3. Construct Payload for External API
         const externalPayload = {
@@ -323,7 +590,8 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -342,7 +610,7 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
         };
 
         console.log('🎯 [SUGGEST] Forwarding suggest-queries request to External API...');
-        console.dir(externalPayload, { depth: null, maxArrayLength: null });
+        console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
 
         // 4. Call External Digital Ocean API for suggestions
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
@@ -433,17 +701,38 @@ router.post('/webhook', async (req, res) => {
     const update = req.body;
     // conversation_id may be provided in body or query param
     const convId = update.conversation_id || req.query.conversation_id;
+    const normalizedUpdate = normalizeTaskUpdatePayload(
+        update,
+        update.task_id || update.data?.task_id,
+        convId || update.conversation_id
+    );
 
     console.log('🔔 [WEBHOOK] Received update for conversation', convId, update);
+    const normalizedStatus = String(normalizedUpdate.status || '').toUpperCase();
+    if (
+        normalizedUpdate.task_id &&
+        (normalizedStatus === 'COMPLETED' || normalizedStatus === 'FAILED') &&
+        taskPollers.has(normalizedUpdate.task_id)
+    ) {
+        clearInterval(taskPollers.get(normalizedUpdate.task_id));
+        taskPollers.delete(normalizedUpdate.task_id);
+    }
+    await updateAnalysisApiLogByTaskId({
+        taskId: normalizedUpdate.task_id || normalizedUpdate.result?.request_id || normalizedUpdate.details?.result?.request_id,
+        responsePayload: normalizedUpdate,
+        errorPayload: normalizedStatus === 'FAILED' ? normalizedUpdate : null,
+        success: normalizedStatus === 'COMPLETED',
+        conversationId: convId || null
+    });
     // broadcast event
     if (convId) {
-        sendSse(convId, 'task_update', update);
+        sendSse(convId, 'task_update', normalizedUpdate);
         // persist small status message if provided
         try {
-            if (update.message) {
+            if (normalizedUpdate.message) {
                 await db.query(
                     `INSERT INTO chat_messages (conversation_id, role, content) VALUES ($1, $2, $3)`,
-                    [convId, 'assistant', `[${update.status}] ${update.message}`]
+                    [convId, 'assistant', `[${normalizedUpdate.status}] ${normalizedUpdate.message}`]
                 );
             }
         } catch (e) {
@@ -458,8 +747,9 @@ router.post('/webhook', async (req, res) => {
  * forwards to external API, returns the task id to caller.
  */
 router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) => {
-    const { question, max_rows = 100, locale = 'en', include_insights = true, include_visualizations = true } = req.body;
-    const { organization_id, role } = req.user;
+    const { question, max_rows = 25, locale = 'en', include_insights = true, include_visualizations = true } = req.body;
+    const { organization_id, role, id: user_id } = req.user;
+    const startedAt = Date.now();
 
     // conversation_id will be carried via webhook URL query parameter
     const conversation_id = req.query.conversation_id;
@@ -486,38 +776,14 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
 
         const conn = connectionResult.rows[0];
 
-        const schemaResult = await db.query(
-            `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
-             FROM semantic_tables st
-             JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
-            [conn.id]
-        );
-
-        const schemaInfo = {};
-        const allowedTables = [];
-        const disallowedTables = [];
-        const allowedColumns = {};
-        const restrictedColumns = {};
-
-        schemaResult.rows.forEach(row => {
-            const tbl = row.table_name;
-            const col = row.column_name;
-            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-            schemaInfo[tbl].push(col);
-            if (row.table_enabled) {
-                if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
-                if (row.column_enabled) {
-                    if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
-                    allowedColumns[tbl].push(col);
-                } else {
-                    if (!restrictedColumns[tbl]) restrictedColumns[tbl] = [];
-                    restrictedColumns[tbl].push(col);
-                }
-            } else {
-                if (!disallowedTables.includes(tbl)) disallowedTables.push(tbl);
-            }
-        });
+        const {
+            schemaInfo,
+            allowedTables,
+            disallowedTables,
+            allowedColumns,
+            restrictedColumns,
+            relationships
+        } = await buildSemanticContext(conn);
 
         const externalPayload = {
             db_config: {
@@ -528,7 +794,8 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
                 database: conn.database_name,
                 username: conn.username,
                 password: conn.password,
-                schema_info: schemaInfo
+                schema_info: schemaInfo,
+                relationships
             },
             access_policy: {
                 role: role.toLowerCase(),
@@ -552,7 +819,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
         const webhookUrl = `${req.protocol}://${req.get('host')}/api/v1/webhook?conversation_id=${encodeURIComponent(conversation_id)}`;
 
         console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', 'webhookUrl=', webhookUrl);
-        console.dir(externalPayload, { depth: null, maxArrayLength: null });
+        console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
 
@@ -563,6 +830,19 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
                 'Content-Type': 'application/json'
             },
             timeout: 45000
+        });
+
+        await logAnalysisApiCall({
+            organizationId: organization_id,
+            userId: user_id,
+            conversationId: conversation_id,
+            endpoint: '/api/v1/analyze-async',
+            question,
+            requestPayload: externalPayload,
+            responsePayload: response.data,
+            statusCode: response.status,
+            durationMs: Date.now() - startedAt,
+            success: true
         });
 
         console.log('✅ [ASYNC ANALYZE] Received task creation response');
@@ -590,9 +870,23 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             pollTaskStatus(returnedTaskId, conversation_id);
         }
     } catch (error) {
-        console.error('❌ [ASYNC ANALYZE] Proxy Error:', error.response?.data || error.message);
+        console.error(' [ASYNC ANALYZE] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'External analysis service failed' };
+
+        await logAnalysisApiCall({
+            organizationId: organization_id,
+            userId: user_id,
+            conversationId: conversation_id,
+            endpoint: '/api/v1/analyze-async',
+            question,
+            requestPayload: req.body,
+            errorPayload: errorData,
+            statusCode,
+            durationMs: Date.now() - startedAt,
+            success: false
+        });
+
         res.status(statusCode).json({
             success: false,
             message: 'External Async Analysis API Error',
@@ -808,7 +1102,7 @@ router.get('/task/:taskId/status', authenticateToken, async (req, res) => {
 
         res.json(response.data);
     } catch (error) {
-        console.error('❌ [TASK STATUS] Proxy Error:', error.response?.data || error.message);
+        console.error(' [TASK STATUS] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'Failed to fetch task status' };
         res.status(statusCode).json({
@@ -824,6 +1118,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
     console.log('📨 [TASK RESULT] Fetching result for', taskId);
 
     try {
+        await delay(1);
         const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
 
@@ -836,7 +1131,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
 
         res.json(response.data);
     } catch (error) {
-        console.error('❌ [TASK RESULT] Proxy Error:', error.response?.data || error.message);
+        console.error('[TASK RESULT] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'Failed to fetch task result' };
         res.status(statusCode).json({
@@ -853,6 +1148,10 @@ async function pollTaskStatus(taskId, conversationId) {
     console.log('🔁 Starting poll for task', taskId);
     const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
     const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+    if (taskPollers.has(taskId)) {
+        clearInterval(taskPollers.get(taskId));
+        taskPollers.delete(taskId);
+    }
     const interval = setInterval(async () => {
         try {
             const resp = await axios.get(statusUrl, {
@@ -865,17 +1164,31 @@ async function pollTaskStatus(taskId, conversationId) {
             console.log('🔁 poll response', data);
             // some versions wrap under { success,data: {...} }
             const status = data.status ?? data.data?.status;
+            const normalizedStatus = String(status || '').toUpperCase();
             console.log('🔁 poll status', status);
+            await updateAnalysisApiLogByTaskId({
+                taskId,
+                responsePayload: normalizeTaskUpdatePayload(data, taskId, conversationId),
+                errorPayload: normalizedStatus === 'FAILED' ? normalizeTaskUpdatePayload(data, taskId, conversationId) : null,
+                success: normalizedStatus === 'COMPLETED',
+                conversationId
+            });
             // broadcast update via SSE, send entire response so frontend can inspect
-            sendSse(conversationId, 'task_update', data);
-            if (status === 'COMPLETED' || status === 'FAILED') {
+            sendSse(
+                conversationId,
+                'task_update',
+                normalizeTaskUpdatePayload(data, taskId, conversationId)
+            );
+            if (normalizedStatus === 'COMPLETED' || normalizedStatus === 'FAILED') {
                 clearInterval(interval);
+                taskPollers.delete(taskId);
                 // frontend will fetch final result when it sees completed via SSE
             }
         } catch (e) {
             console.error('🔁 poll error', e.message);
         }
     }, 5000);
+    taskPollers.set(taskId, interval);
 }
 
 

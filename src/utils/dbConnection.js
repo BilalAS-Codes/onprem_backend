@@ -1,6 +1,8 @@
 const { Client } = require('pg');
 const mysql = require('mysql2/promise');
 const db = require('../config/database');
+const dbDiscoverer = require('../helpers/dbDiscoverer');
+const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
 
 const testConnection = async (config) => {
   const startTime = Date.now();
@@ -78,7 +80,10 @@ const testConnection = async (config) => {
 };
 
 const getSchema = async (connectionId, config) => {
+  let metadataPool = null;
   try {
+    await ensureSchemaMetadataStorage(db);
+
     let tables = [];
     const columns = [];
 
@@ -156,6 +161,8 @@ const getSchema = async (connectionId, config) => {
       await connection.end();
     }
 
+    metadataPool = await dbDiscoverer.getConnectionPool(config);
+
     // Store schema in local database if semantic tables exist
     for (const table of tables) {
       try {
@@ -171,19 +178,28 @@ const getSchema = async (connectionId, config) => {
         const tableId = tableResult.rows[0].id;
 
         const tableColumns = columns.find(c => c.table_name === table.table_name)?.columns || [];
+        const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
+          metadataPool,
+          config.db_type,
+          table.table_name
+        );
+        const columnMetadataMap = new Map(
+          columnMetadata.map((column) => [String(column.column_name), column])
+        );
 
         for (const column of tableColumns) {
           await db.query(
             `INSERT INTO semantic_columns (
               semantic_table_id, column_name, business_name, data_type,
-              is_nullable, default_value, is_enabled
+              is_nullable, default_value, enum_values, is_enabled
             )
-            VALUES ($1, $2, $3, $4, $5, $6, true)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, true)
             ON CONFLICT (semantic_table_id, column_name)
             DO UPDATE SET
               data_type = $4,
               is_nullable = $5,
               default_value = $6,
+              enum_values = $7::jsonb,
               updated_at = CURRENT_TIMESTAMP`,
             [
               tableId,
@@ -191,7 +207,37 @@ const getSchema = async (connectionId, config) => {
               column.column_name,
               column.data_type,
               column.is_nullable === 'YES',
-              column.column_default
+              column.column_default,
+              JSON.stringify(
+                Array.isArray(columnMetadataMap.get(String(column.column_name))?.enum_values)
+                  ? columnMetadataMap.get(String(column.column_name)).enum_values
+                  : []
+              )
+            ]
+          );
+        }
+
+        const foreignKeys = await dbDiscoverer.discoverForeignKeys(
+          metadataPool,
+          config.db_type,
+          table.table_name
+        );
+
+        for (const foreignKey of foreignKeys) {
+          await db.query(
+            `INSERT INTO semantic_relationships (
+              connection_id, source_table, source_column, target_table, target_column, relation_type
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (connection_id, source_table, source_column, target_table, target_column, relation_type)
+            DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+            [
+              connectionId,
+              table.table_name,
+              String(foreignKey.column_name || '').trim(),
+              String(foreignKey.foreign_table || '').trim(),
+              String(foreignKey.foreign_column || '').trim(),
+              'foreign_key'
             ]
           );
         }
@@ -200,7 +246,6 @@ const getSchema = async (connectionId, config) => {
         console.warn('Skipping storing schema for table', table.table_name, innerErr.message);
       }
     }
-
     try {
       await db.query('UPDATE database_connections SET last_synced_at = CURRENT_TIMESTAMP WHERE id = $1', [connectionId]);
     } catch (e) {
@@ -211,6 +256,10 @@ const getSchema = async (connectionId, config) => {
   } catch (error) {
     console.error('Get schema error:', error);
     return { success: false, error: error.message };
+  } finally {
+    if (metadataPool) {
+      await metadataPool.end().catch(() => {});
+    }
   }
 };
 
