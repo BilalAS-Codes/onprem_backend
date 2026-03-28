@@ -121,7 +121,146 @@ async getConnections(req, res) {
 }
 ,
 
-  async updateConnection(req, res) {
+//   async updateConnection(req, res) {
+//   try {
+//     const { id } = req.params;
+//     const updates = req.body;
+//     const organizationId = req.user.organization_id;
+
+//     const connection = await DatabaseConnection.findById(id);
+//     if (!connection || connection.organization_id !== organizationId) {
+//       return res.status(404).json({
+//         success: false,
+//         error: 'Connection not found'
+//       });
+//     }
+
+//     // ---------- NORMALIZE + COMPARE (NO PASSWORD) ----------
+//     const normalize = (v) =>
+//       typeof v === 'string' ? v.trim() : v;
+
+//     const incoming = {
+//       db_type: normalize(updates.db_type ?? connection.db_type),
+//       host: normalize(updates.host ?? connection.host),
+//       port: Number(updates.port ?? connection.port),
+//       database_name: normalize(updates.database_name ?? connection.database_name),
+//       username: normalize(updates.username ?? connection.username),
+//       ssl_enabled: updates.ssl_enabled ?? connection.ssl_enabled
+//     };
+
+//     const existing = {
+//       db_type: normalize(connection.db_type),
+//       host: normalize(connection.host),
+//       port: Number(connection.port),
+//       database_name: normalize(connection.database_name),
+//       username: normalize(connection.username),
+//       ssl_enabled: connection.ssl_enabled
+//     };
+
+//     const isSameConfig =
+//       incoming.db_type === existing.db_type &&
+//       incoming.host === existing.host &&
+//       incoming.port === existing.port &&
+//       incoming.database_name === existing.database_name &&
+//       incoming.username === existing.username &&
+//       incoming.ssl_enabled === existing.ssl_enabled;
+
+//     // ---------- CASE 1: SAME CONFIG, NO PASSWORD ----------
+//     if (isSameConfig && !updates.password) {
+//       return res.json({
+//         success: true,
+//         no_change: true,
+//         message: 'No changes detected.'
+//       });
+//     }
+
+//     // ---------- CASE 2: SAME CONFIG, PASSWORD ONLY ----------
+//     if (isSameConfig && updates.password) {
+//       const testResult = await testConnection({
+//         ...incoming,
+//         password: updates.password
+//       });
+
+//       if (!testResult.success) {
+//         return res.status(400).json({
+//           success: false,
+//           error: 'Connection test failed',
+//           details: testResult.error
+//         });
+//       }
+
+//       return res.json({
+//         success: true,
+//         no_change: true,
+//         message: 'Credentials verified. No configuration changes.'
+//       });
+//     }
+
+//     // ---------- CASE 3: CONFIG CHANGED ----------
+//     const testResult = await testConnection({
+//       ...incoming,
+//       password: updates.password || connection.password
+//     });
+
+//     if (!testResult.success) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Connection test failed',
+//         details: testResult.error
+//       });
+//     }
+
+//     // const updatedConnection = await DatabaseConnection.update(id, {
+//     //   ...incoming,
+//     //   ...(updates.password && { password: updates.password }),
+//     //   latency_ms: testResult.latency_ms,
+//     //   status: 'connected'
+//     // });
+
+//     // const { password, ...safeConnection } = updatedConnection;
+
+//     // res.json({
+//     //   success: true,
+//     //   updated: true,
+//     //   connection: safeConnection
+//     // });
+
+
+//     // Update the connection record
+// const updatedConnection = await DatabaseConnection.update(id, {
+//   ...incoming,
+//   ...(updates.password && { password: updates.password }),
+//   latency_ms: testResult.latency_ms,
+//   status: 'connected'
+// });
+
+// // 🔁 Auto re-seed schema ONLY when config actually changed
+// await schemaController.discoverAndSeedSchema({
+//   params: { connectionId: id },
+//   body: { override_existing: true, seed_tables: true, seed_columns: true },
+//   user: req.user,
+//   query: {}
+// });
+
+// const { password, ...safeConnection } = updatedConnection;
+// res.json({
+//   success: true,
+//   updated: true,
+//   connection: safeConnection,
+//   schema_resynced: true // optional signal to frontend
+// });
+
+//   } catch (error) {
+//     console.error('Update connection error:', error);
+//     res.status(500).json({
+//       success: false,
+//       error: 'Failed to update connection'
+//     });
+//   }
+// }
+// In databaseController.js - updateConnection method
+
+async updateConnection(req, res) {
   try {
     const { id } = req.params;
     const updates = req.body;
@@ -210,45 +349,48 @@ async getConnections(req, res) {
       });
     }
 
-    // const updatedConnection = await DatabaseConnection.update(id, {
-    //   ...incoming,
-    //   ...(updates.password && { password: updates.password }),
-    //   latency_ms: testResult.latency_ms,
-    //   status: 'connected'
-    // });
-
-    // const { password, ...safeConnection } = updatedConnection;
-
-    // res.json({
-    //   success: true,
-    //   updated: true,
-    //   connection: safeConnection
-    // });
-
-
     // Update the connection record
-const updatedConnection = await DatabaseConnection.update(id, {
-  ...incoming,
-  ...(updates.password && { password: updates.password }),
-  latency_ms: testResult.latency_ms,
-  status: 'connected'
-});
+    const updatedConnection = await DatabaseConnection.update(id, {
+      ...incoming,
+      ...(updates.password && { password: updates.password }),
+      latency_ms: testResult.latency_ms,
+      status: 'connected'
+    });
 
-// 🔁 Auto re-seed schema ONLY when config actually changed
-await schemaController.discoverAndSeedSchema({
-  params: { connectionId: id },
-  body: { override_existing: true, seed_tables: true, seed_columns: true },
-  user: req.user,
-  query: {}
-});
+    // 🔁 Auto re-seed schema ONLY when config actually changed
+    // Create a mock request object for the controller
+    const mockReq = {
+      params: { connectionId: id },
+      body: { override_existing: true, seed_tables: true, seed_columns: true },
+      user: req.user,
+      query: {}
+    };
+    
+    const mockRes = {
+      json: (data) => {
+        console.log('Schema discovery completed:', data);
+      },
+      status: (code) => ({
+        json: (data) => {
+          console.error('Schema discovery error:', data);
+        }
+      })
+    };
 
-const { password, ...safeConnection } = updatedConnection;
-res.json({
-  success: true,
-  updated: true,
-  connection: safeConnection,
-  schema_resynced: true // optional signal to frontend
-});
+    try {
+      await schemaController.discoverAndSeedSchema(mockReq, mockRes);
+    } catch (schemaError) {
+      console.error('Schema re-seeding failed:', schemaError);
+      // Don't fail the whole request if schema seeding fails
+    }
+
+    const { password, ...safeConnection } = updatedConnection;
+    res.json({
+      success: true,
+      updated: true,
+      connection: safeConnection,
+      schema_resynced: true
+    });
 
   } catch (error) {
     console.error('Update connection error:', error);

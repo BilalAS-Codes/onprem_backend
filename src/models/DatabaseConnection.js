@@ -36,6 +36,13 @@ const DatabaseConnection = {
     );
     return result.rows[0];
   },
+  async findByIdWithPassword(id) {
+  const result = await db.query(
+    'SELECT * FROM database_connections WHERE id = $1',
+    [id]
+  );
+  return result.rows[0];
+},
 
   async findByOrganization(organizationId) {
     const result = await db.query(
