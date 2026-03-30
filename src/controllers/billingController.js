@@ -34,6 +34,27 @@ const ensureSubscriptionStateTable = async () => {
   );
 };
 
+const ensurePlanLocalizationColumns = async () => {
+  await db.query(
+    `ALTER TABLE plans
+      ADD COLUMN IF NOT EXISTS name_ar TEXT,
+      ADD COLUMN IF NOT EXISTS description TEXT,
+      ADD COLUMN IF NOT EXISTS description_ar TEXT,
+      ADD COLUMN IF NOT EXISTS features_ar JSONB`
+  );
+
+  await db.query(
+    `UPDATE plans
+     SET name_ar = CASE
+       WHEN lower(name) = 'starter' THEN 'المبتدئ'
+       WHEN lower(name) = 'growth' THEN 'النمو'
+       WHEN lower(name) = 'enterprise' THEN 'المؤسسات'
+       ELSE name_ar
+     END
+     WHERE name_ar IS NULL OR TRIM(name_ar) = ''`
+  );
+};
+
 const escapePdfText = (value) => String(value ?? '')
   .replace(/\\/g, '\\\\')
   .replace(/\(/g, '\\(')
@@ -108,8 +129,9 @@ const getSubscriptionState = async (organizationId) => {
 
 const getPendingPlanChange = async (organizationId) => {
   await ensurePlanChangeTable();
+  await ensurePlanLocalizationColumns();
   const res = await db.query(
-    `SELECT bpc.*, p.name AS to_plan_name
+    `SELECT bpc.*, p.name AS to_plan_name, p.name_ar AS to_plan_name_ar
      FROM billing_plan_changes bpc
      LEFT JOIN plans p ON bpc.to_plan_id = p.id
      WHERE bpc.organization_id = $1 AND bpc.status = 'scheduled'
@@ -183,6 +205,7 @@ const billingController = {
   async getCurrentPlan(req, res) {
     try {
       const organizationId = req.user.organization_id;
+      await ensurePlanLocalizationColumns();
 
       // Apply any due scheduled changes before returning plan
       await applyDuePlanChanges(organizationId);
@@ -192,13 +215,9 @@ const billingController = {
         `SELECT o.id AS organization_id,
                 o.created_at,
                 o.plan_id AS current_plan_id,
+                p.*,
                 p.id AS plan_id,
                 p.name AS plan_name,
-                p.price_monthly,
-                p.user_limit,
-                p.db_limit,
-                p.query_limit,
-                p.features,
                 (SELECT COUNT(*) FROM users WHERE organization_id = o.id AND status = 'active') AS active_users,
                 (SELECT COUNT(*) FROM database_connections WHERE organization_id = o.id) AS db_connections,
                 (SELECT COUNT(*) FROM query_history WHERE organization_id = o.id AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)) AS queries_this_month
@@ -230,7 +249,7 @@ const billingController = {
 
       // Get all plans
       const allPlansResult = await db.query(
-        `SELECT id, name, price_monthly, user_limit, db_limit, query_limit, features
+        `SELECT *
          FROM plans
          ORDER BY price_monthly ASC`
       );
@@ -242,6 +261,10 @@ const billingController = {
         ? {
           id: row.plan_id,
           name: effectivePlanName,
+          name_ar: row.name_ar || null,
+          description: row.description || null,
+          description_ar: row.description_ar || null,
+          features_ar: row.features_ar || null,
           price_monthly: effectivePlanPrice,
           price_yearly: effectivePlanPrice > 0 ? effectivePlanPrice * 12 : 0,
           billing_cycle: 'monthly',
@@ -286,6 +309,7 @@ const billingController = {
             ? {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
+              to_plan_name_ar: pendingChange.to_plan_name_ar || null,
               effective_date: pendingChange.effective_date,
               type: pendingChangeType
             }
@@ -294,6 +318,10 @@ const billingController = {
         : {
           id: 'trial',
           name: effectivePlanName,
+          name_ar: row.name_ar || null,
+          description: row.description || null,
+          description_ar: row.description_ar || null,
+          features_ar: row.features_ar || null,
           price_monthly: 0,
           price_yearly: 0,
           billing_cycle: 'monthly',
@@ -326,6 +354,7 @@ const billingController = {
             ? {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
+              to_plan_name_ar: pendingChange.to_plan_name_ar || null,
               effective_date: pendingChange.effective_date,
               type: pendingChangeType
             }
@@ -339,9 +368,13 @@ const billingController = {
         plans: allPlansResult.rows.map((plan) => ({
           id: plan.id,
           name: plan.name,
+          name_ar: plan.name_ar || null,
+          description: plan.description || null,
+          description_ar: plan.description_ar || null,
           price_monthly: plan.price_monthly,
           price_yearly: Number(plan.price_monthly || 0) * 12,
           features: plan.features,
+          features_ar: plan.features_ar || null,
           limits: {
             users: plan.user_limit,
             databases: plan.db_limit,
@@ -386,49 +419,52 @@ const billingController = {
         [organizationId, plan_id]
       );
 
-      if (existingOpenOrder.rows.length) {
-        const existing = existingOpenOrder.rows[0];
-        const orderPayload = {
-          id: existing.razorpay_order_id,
-          amount: Number(existing.amount || plan.price_monthly || 0) * 100,
-          currency: BILLING_CURRENCY,
-          key: process.env.RAZORPAY_KEY_ID,
-        };
-
-        return res.json({
-          success: true,
-          reused: true,
-          order: orderPayload,
-          order_id: orderPayload.id,
-          amount: orderPayload.amount,
-          currency: orderPayload.currency,
-          key: process.env.RAZORPAY_KEY_ID,
-        });
-      }
-
       const order = await razorpay.orders.create({
         amount: Number(plan.price_monthly) * 100,
         currency: BILLING_CURRENCY,
         receipt: `rcpt_${Date.now()}`,
       });
 
-      // Insert transaction. Some DBs may not have the `receipt` column, so try with receipt first
-      try {
-        await db.query(
-          `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status, receipt)
-           VALUES ($1, $2, $3, $4, 'created', $5) RETURNING id`,
-          [organizationId, plan_id, order.id, plan.price_monthly, order.receipt || '']
-        );
-      } catch (insertErr) {
-        // If column doesn't exist (Postgres 42703), retry without receipt
-        if (insertErr && insertErr.code === '42703') {
+      if (existingOpenOrder.rows.length) {
+        const existing = existingOpenOrder.rows[0];
+        try {
           await db.query(
-            `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status)
-             VALUES ($1, $2, $3, $4, 'created') RETURNING id`,
-            [organizationId, plan_id, order.id, plan.price_monthly]
+            `UPDATE billing_transactions
+             SET razorpay_order_id = $1, amount = $2, status = 'created', receipt = $3
+             WHERE id = $4`,
+            [order.id, plan.price_monthly, order.receipt || '', existing.id]
           );
-        } else {
-          throw insertErr;
+        } catch (updateErr) {
+          if (updateErr && updateErr.code === '42703') {
+            await db.query(
+              `UPDATE billing_transactions
+               SET razorpay_order_id = $1, amount = $2, status = 'created'
+               WHERE id = $3`,
+              [order.id, plan.price_monthly, existing.id]
+            );
+          } else {
+            throw updateErr;
+          }
+        }
+      } else {
+        // Insert transaction. Some DBs may not have the `receipt` column, so try with receipt first
+        try {
+          await db.query(
+            `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status, receipt)
+             VALUES ($1, $2, $3, $4, 'created', $5) RETURNING id`,
+            [organizationId, plan_id, order.id, plan.price_monthly, order.receipt || '']
+          );
+        } catch (insertErr) {
+          // If column doesn't exist (Postgres 42703), retry without receipt
+          if (insertErr && insertErr.code === '42703') {
+            await db.query(
+              `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status)
+               VALUES ($1, $2, $3, $4, 'created') RETURNING id`,
+              [organizationId, plan_id, order.id, plan.price_monthly]
+            );
+          } else {
+            throw insertErr;
+          }
         }
       }
 
@@ -715,22 +751,6 @@ const billingController = {
 
       if (status === 'paid') {
         return res.status(400).json({ error: 'Invoice already paid' });
-      }
-
-      if (txn.razorpay_order_id) {
-        return res.json({
-          success: true,
-          order: {
-            id: txn.razorpay_order_id,
-            amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-            currency: BILLING_CURRENCY,
-            key: process.env.RAZORPAY_KEY_ID
-          },
-          order_id: txn.razorpay_order_id,
-          amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-          currency: BILLING_CURRENCY,
-          key: process.env.RAZORPAY_KEY_ID
-        });
       }
 
       const amount = Number(txn.amount || txn.price_monthly || 0);
