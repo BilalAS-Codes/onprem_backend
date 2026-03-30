@@ -4,6 +4,7 @@ const razorpay = require('../config/razorpay');
 const crypto = require('crypto');
 const creditService = require('../services/creditService');
 const emailService = require('../services/emailService');
+const BILLING_CURRENCY = (process.env.BILLING_CURRENCY || 'USD').toUpperCase();
 
 const ensurePlanChangeTable = async () => {
   await db.query(
@@ -390,7 +391,7 @@ const billingController = {
         const orderPayload = {
           id: existing.razorpay_order_id,
           amount: Number(existing.amount || plan.price_monthly || 0) * 100,
-          currency: 'INR',
+          currency: BILLING_CURRENCY,
           key: process.env.RAZORPAY_KEY_ID,
         };
 
@@ -407,7 +408,7 @@ const billingController = {
 
       const order = await razorpay.orders.create({
         amount: Number(plan.price_monthly) * 100,
-        currency: 'INR',
+        currency: BILLING_CURRENCY,
         receipt: `rcpt_${Date.now()}`,
       });
 
@@ -722,12 +723,12 @@ const billingController = {
           order: {
             id: txn.razorpay_order_id,
             amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-            currency: 'INR',
+            currency: BILLING_CURRENCY,
             key: process.env.RAZORPAY_KEY_ID
           },
           order_id: txn.razorpay_order_id,
           amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-          currency: 'INR',
+          currency: BILLING_CURRENCY,
           key: process.env.RAZORPAY_KEY_ID
         });
       }
@@ -739,7 +740,7 @@ const billingController = {
 
       const order = await razorpay.orders.create({
         amount: amount * 100,
-        currency: 'INR',
+        currency: BILLING_CURRENCY,
         receipt: `rcpt_${Date.now()}`
       });
 

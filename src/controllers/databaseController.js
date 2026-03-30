@@ -35,6 +35,8 @@ const databaseController = {
         });
       }
 
+      const effectiveSslEnabled = Boolean(testResult.used_ssl ?? ssl_enabled);
+
       // Create connection record
       const connection = await DatabaseConnection.create({
         organization_id: organizationId,
@@ -44,7 +46,7 @@ const databaseController = {
         database_name,
         username,
         password, // Note: In production, encrypt this
-        ssl_enabled,
+        ssl_enabled: effectiveSslEnabled,
         latency_ms: testResult.latency_ms,
         status: 'connected'
       });
@@ -57,7 +59,7 @@ const databaseController = {
         database_name,
         username,
         password,
-        ssl_enabled
+        ssl_enabled: effectiveSslEnabled
       });
 
       res.status(201).json({
@@ -328,10 +330,13 @@ async updateConnection(req, res) {
         });
       }
 
+      const effectiveSslEnabled = Boolean(testResult.used_ssl ?? incoming.ssl_enabled);
+
       return res.json({
         success: true,
         no_change: true,
-        message: 'Credentials verified. No configuration changes.'
+        message: 'Credentials verified. No configuration changes.',
+        ssl_enabled: effectiveSslEnabled
       });
     }
 
@@ -349,9 +354,12 @@ async updateConnection(req, res) {
       });
     }
 
+    const effectiveSslEnabled = Boolean(testResult.used_ssl ?? incoming.ssl_enabled);
+
     // Update the connection record
     const updatedConnection = await DatabaseConnection.update(id, {
       ...incoming,
+      ssl_enabled: effectiveSslEnabled,
       ...(updates.password && { password: updates.password }),
       latency_ms: testResult.latency_ms,
       status: 'connected'
@@ -438,18 +446,22 @@ async updateConnection(req, res) {
       ssl_enabled
     });
 
+    const effectiveSslEnabled = Boolean(testResult.used_ssl ?? ssl_enabled);
+
     // Update connection status in database
     await DatabaseConnection.update(id, {
       status: testResult.success ? 'connected' : 'disconnected',
       latency_ms: testResult.latency_ms,
-      last_synced_at: testResult.success ? new Date() : null
+      last_synced_at: testResult.success ? new Date() : null,
+      ...(testResult.success ? { ssl_enabled: effectiveSslEnabled } : {})
     });
 
     // Return appropriate HTTP status based on test result
     if (testResult.success) {
       return res.status(200).json({
         success: true,
-        latency_ms: testResult.latency_ms
+        latency_ms: testResult.latency_ms,
+        ssl_enabled: effectiveSslEnabled
       });
     } else {
       return res.status(400).json({
