@@ -4,6 +4,8 @@ const razorpay = require('../config/razorpay');
 const crypto = require('crypto');
 const creditService = require('../services/creditService');
 const emailService = require('../services/emailService');
+const { enrichPlanRecord, resolvePlanPrice } = require('../utils/planCatalog');
+const BILLING_CURRENCY = (process.env.BILLING_CURRENCY || 'USD').toUpperCase();
 
 const ensurePlanChangeTable = async () => {
   await db.query(
@@ -30,6 +32,27 @@ const ensureSubscriptionStateTable = async () => {
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     )`
+  );
+};
+
+const ensurePlanLocalizationColumns = async () => {
+  await db.query(
+    `ALTER TABLE plans
+      ADD COLUMN IF NOT EXISTS name_ar TEXT,
+      ADD COLUMN IF NOT EXISTS description TEXT,
+      ADD COLUMN IF NOT EXISTS description_ar TEXT,
+      ADD COLUMN IF NOT EXISTS features_ar JSONB`
+  );
+
+  await db.query(
+    `UPDATE plans
+     SET name_ar = CASE
+       WHEN lower(name) = 'starter' THEN 'المبتدئ'
+       WHEN lower(name) = 'growth' THEN 'النمو'
+       WHEN lower(name) = 'enterprise' THEN 'المؤسسات'
+       ELSE name_ar
+     END
+     WHERE name_ar IS NULL OR TRIM(name_ar) = ''`
   );
 };
 
@@ -107,8 +130,9 @@ const getSubscriptionState = async (organizationId) => {
 
 const getPendingPlanChange = async (organizationId) => {
   await ensurePlanChangeTable();
+  await ensurePlanLocalizationColumns();
   const res = await db.query(
-    `SELECT bpc.*, p.name AS to_plan_name
+    `SELECT bpc.*, p.name AS to_plan_name, p.name_ar AS to_plan_name_ar
      FROM billing_plan_changes bpc
      LEFT JOIN plans p ON bpc.to_plan_id = p.id
      WHERE bpc.organization_id = $1 AND bpc.status = 'scheduled'
@@ -125,7 +149,9 @@ const resolvePendingChangeType = async (organizationId, pendingChange) => {
   try {
     const result = await db.query(
       `SELECT
+         current_plan.name AS current_plan_name,
          current_plan.price_monthly AS current_price,
+         target_plan.name AS target_plan_name,
          target_plan.price_monthly AS target_price
        FROM organizations o
        LEFT JOIN plans current_plan ON o.plan_id = current_plan.id
@@ -135,8 +161,8 @@ const resolvePendingChangeType = async (organizationId, pendingChange) => {
     );
 
     const row = result.rows[0] || {};
-    const currentPrice = Number(row.current_price || 0);
-    const targetPrice = Number(row.target_price || 0);
+    const currentPrice = resolvePlanPrice({ name: row.current_plan_name, price_monthly: row.current_price });
+    const targetPrice = resolvePlanPrice({ name: row.target_plan_name, price_monthly: row.target_price });
 
     return targetPrice >= currentPrice ? 'upgrade' : 'downgrade';
   } catch (error) {
@@ -182,6 +208,7 @@ const billingController = {
   async getCurrentPlan(req, res) {
     try {
       const organizationId = req.user.organization_id;
+      await ensurePlanLocalizationColumns();
 
       // Apply any due scheduled changes before returning plan
       await applyDuePlanChanges(organizationId);
@@ -191,13 +218,9 @@ const billingController = {
         `SELECT o.id AS organization_id,
                 o.created_at,
                 o.plan_id AS current_plan_id,
+                p.*,
                 p.id AS plan_id,
                 p.name AS plan_name,
-                p.price_monthly,
-                p.user_limit,
-                p.db_limit,
-                p.query_limit,
-                p.features,
                 (SELECT COUNT(*) FROM users WHERE organization_id = o.id AND status = 'active') AS active_users,
                 (SELECT COUNT(*) FROM database_connections WHERE organization_id = o.id) AS db_connections,
                 (SELECT COUNT(*) FROM query_history WHERE organization_id = o.id AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)) AS queries_this_month
@@ -212,12 +235,18 @@ const billingController = {
       }
 
       const row = currentPlanResult.rows[0];
+      const enrichedCurrentPlanRow = enrichPlanRecord({
+        ...row,
+        name: row.plan_name || row.name
+      });
 
       // Get credit balance
       const creditBalance = await creditService.getBalance(organizationId);
       const subscriptionState = await getSubscriptionState(organizationId);
-      const effectivePlanName = row.plan_name || 'Free Trial';
-      const effectivePlanPrice = Number(row.price_monthly || 0);
+      const effectivePlanName = enrichedCurrentPlanRow.plan_name || enrichedCurrentPlanRow.name || 'Free Trial';
+      const effectivePlanPrice = resolvePlanPrice(enrichedCurrentPlanRow);
+      const effectiveUserLimit = enrichedCurrentPlanRow.user_limit == null ? null : Number(enrichedCurrentPlanRow.user_limit || 0);
+      const effectiveQueryLimit = enrichedCurrentPlanRow.query_limit == null ? null : Number(enrichedCurrentPlanRow.query_limit || 0);
       const nextBillingDate =
         creditBalance?.expiration_date ||
         (row.created_at ? new Date(new Date(row.created_at).getTime() + 30 * 24 * 60 * 60 * 1000) : null);
@@ -229,7 +258,7 @@ const billingController = {
 
       // Get all plans
       const allPlansResult = await db.query(
-        `SELECT id, name, price_monthly, user_limit, db_limit, query_limit, features
+        `SELECT *
          FROM plans
          ORDER BY price_monthly ASC`
       );
@@ -241,21 +270,29 @@ const billingController = {
         ? {
           id: row.plan_id,
           name: effectivePlanName,
+          name_ar: enrichedCurrentPlanRow.name_ar || null,
+          description: enrichedCurrentPlanRow.description || null,
+          description_ar: enrichedCurrentPlanRow.description_ar || null,
+          features_ar: enrichedCurrentPlanRow.features_ar || null,
+          feature_list: enrichedCurrentPlanRow.feature_list || [],
+          feature_list_ar: enrichedCurrentPlanRow.feature_list_ar || [],
           price_monthly: effectivePlanPrice,
           price_yearly: effectivePlanPrice > 0 ? effectivePlanPrice * 12 : 0,
+          price_label: enrichedCurrentPlanRow.price_label || null,
+          price_label_ar: enrichedCurrentPlanRow.price_label_ar || null,
           billing_cycle: 'monthly',
-          features: row.features || {},
+          features: enrichedCurrentPlanRow.features || {},
           limits: {
-            users: Number(row.user_limit || 0),
+            users: effectiveUserLimit,
             databases: Number(row.db_limit || 0),
-            queries: Number(row.query_limit || 0),
+            queries: effectiveQueryLimit,
             points: Number(creditBalance?.assigned_points_limit || 0),
           },
           usage: {
             users: {
               current: Number(row.active_users),
-              limit: Number(row.user_limit || 0),
-              percentage: safePercent(row.active_users, row.user_limit),
+              limit: effectiveUserLimit,
+              percentage: effectiveUserLimit == null ? 0 : safePercent(row.active_users, effectiveUserLimit),
             },
             databases: {
               current: Number(row.db_connections),
@@ -264,8 +301,8 @@ const billingController = {
             },
             queries: {
               current: Number(row.queries_this_month),
-              limit: Number(row.query_limit || 0),
-              percentage: safePercent(row.queries_this_month, row.query_limit),
+              limit: effectiveQueryLimit,
+              percentage: effectiveQueryLimit == null ? 0 : safePercent(row.queries_this_month, effectiveQueryLimit),
             },
             points: {
               current: Number(creditBalance?.assigned_points_limit || 0) - Number(creditBalance?.remaining_points || 0),
@@ -285,6 +322,7 @@ const billingController = {
             ? {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
+              to_plan_name_ar: pendingChange.to_plan_name_ar || null,
               effective_date: pendingChange.effective_date,
               type: pendingChangeType
             }
@@ -293,10 +331,18 @@ const billingController = {
         : {
           id: 'trial',
           name: effectivePlanName,
+          name_ar: enrichedCurrentPlanRow.name_ar || null,
+          description: enrichedCurrentPlanRow.description || null,
+          description_ar: enrichedCurrentPlanRow.description_ar || null,
+          features_ar: enrichedCurrentPlanRow.features_ar || null,
+          feature_list: enrichedCurrentPlanRow.feature_list || [],
+          feature_list_ar: enrichedCurrentPlanRow.feature_list_ar || [],
           price_monthly: 0,
           price_yearly: 0,
+          price_label: null,
+          price_label_ar: null,
           billing_cycle: 'monthly',
-          features: {},
+          features: enrichedCurrentPlanRow.features || {},
           limits: {
             users: 0,
             databases: 0,
@@ -325,6 +371,7 @@ const billingController = {
             ? {
               to_plan_id: pendingChange.to_plan_id,
               to_plan_name: pendingChange.to_plan_name,
+              to_plan_name_ar: pendingChange.to_plan_name_ar || null,
               effective_date: pendingChange.effective_date,
               type: pendingChangeType
             }
@@ -335,20 +382,33 @@ const billingController = {
         success: true,
         current_plan: currentPlan,
         credits: creditBalance,
-        plans: allPlansResult.rows.map((plan) => ({
-          id: plan.id,
-          name: plan.name,
-          price_monthly: plan.price_monthly,
-          price_yearly: Number(plan.price_monthly || 0) * 12,
-          features: plan.features,
-          limits: {
-            users: plan.user_limit,
-            databases: plan.db_limit,
-            queries: plan.query_limit,
-            points: Number(plan.query_limit || 0),
-          },
-          is_current: row.plan_id ? plan.id === row.plan_id : false,
-        })),
+        plans: allPlansResult.rows.map((plan) => {
+          const enrichedPlan = enrichPlanRecord(plan);
+          const resolvedPlanPrice = resolvePlanPrice(enrichedPlan);
+          return {
+            id: plan.id,
+            name: enrichedPlan.name,
+            name_ar: enrichedPlan.name_ar || null,
+            description: enrichedPlan.description || null,
+            description_ar: enrichedPlan.description_ar || null,
+            price_monthly: resolvedPlanPrice,
+            price_yearly: resolvedPlanPrice > 0 ? resolvedPlanPrice * 12 : 0,
+            price_label: enrichedPlan.price_label || null,
+            price_label_ar: enrichedPlan.price_label_ar || null,
+            features: enrichedPlan.features || {},
+            features_ar: enrichedPlan.features_ar || null,
+            feature_list: enrichedPlan.feature_list || [],
+            feature_list_ar: enrichedPlan.feature_list_ar || [],
+            limits: {
+              users: enrichedPlan.user_limit,
+              databases: plan.db_limit,
+              queries: enrichedPlan.query_limit,
+              points: Number(enrichedPlan.query_limit || 0),
+            },
+            is_current: row.plan_id ? plan.id === row.plan_id : false,
+            popular: Boolean(enrichedPlan.popular),
+          };
+        }),
       });
     } catch (error) {
       console.error('Get current plan error:', error);
@@ -370,7 +430,12 @@ const billingController = {
         return res.status(400).json({ error: 'Invalid plan' });
       }
 
-      const plan = planResult.rows[0];
+      const plan = enrichPlanRecord(planResult.rows[0]);
+      const planPrice = resolvePlanPrice(plan);
+
+      if (!planPrice) {
+        return res.status(400).json({ error: 'This plan requires custom pricing. Please contact sales.' });
+      }
 
       const existingOpenOrder = await db.query(
         `SELECT id, razorpay_order_id, amount
@@ -385,49 +450,52 @@ const billingController = {
         [organizationId, plan_id]
       );
 
-      if (existingOpenOrder.rows.length) {
-        const existing = existingOpenOrder.rows[0];
-        const orderPayload = {
-          id: existing.razorpay_order_id,
-          amount: Number(existing.amount || plan.price_monthly || 0) * 100,
-          currency: 'INR',
-          key: process.env.RAZORPAY_KEY_ID,
-        };
-
-        return res.json({
-          success: true,
-          reused: true,
-          order: orderPayload,
-          order_id: orderPayload.id,
-          amount: orderPayload.amount,
-          currency: orderPayload.currency,
-          key: process.env.RAZORPAY_KEY_ID,
-        });
-      }
-
       const order = await razorpay.orders.create({
-        amount: Number(plan.price_monthly) * 100,
-        currency: 'INR',
+        amount: planPrice * 100,
+        currency: BILLING_CURRENCY,
         receipt: `rcpt_${Date.now()}`,
       });
 
-      // Insert transaction. Some DBs may not have the `receipt` column, so try with receipt first
-      try {
-        await db.query(
-          `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status, receipt)
-           VALUES ($1, $2, $3, $4, 'created', $5) RETURNING id`,
-          [organizationId, plan_id, order.id, plan.price_monthly, order.receipt || '']
-        );
-      } catch (insertErr) {
-        // If column doesn't exist (Postgres 42703), retry without receipt
-        if (insertErr && insertErr.code === '42703') {
+      if (existingOpenOrder.rows.length) {
+        const existing = existingOpenOrder.rows[0];
+        try {
           await db.query(
-            `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status)
-             VALUES ($1, $2, $3, $4, 'created') RETURNING id`,
-            [organizationId, plan_id, order.id, plan.price_monthly]
+            `UPDATE billing_transactions
+             SET razorpay_order_id = $1, amount = $2, status = 'created', receipt = $3
+             WHERE id = $4`,
+            [order.id, planPrice, order.receipt || '', existing.id]
           );
-        } else {
-          throw insertErr;
+        } catch (updateErr) {
+          if (updateErr && updateErr.code === '42703') {
+            await db.query(
+              `UPDATE billing_transactions
+               SET razorpay_order_id = $1, amount = $2, status = 'created'
+               WHERE id = $3`,
+               [order.id, planPrice, existing.id]
+            );
+          } else {
+            throw updateErr;
+          }
+        }
+      } else {
+        // Insert transaction. Some DBs may not have the `receipt` column, so try with receipt first
+        try {
+          await db.query(
+            `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status, receipt)
+             VALUES ($1, $2, $3, $4, 'created', $5) RETURNING id`,
+            [organizationId, plan_id, order.id, planPrice, order.receipt || '']
+          );
+        } catch (insertErr) {
+          // If column doesn't exist (Postgres 42703), retry without receipt
+          if (insertErr && insertErr.code === '42703') {
+            await db.query(
+              `INSERT INTO billing_transactions (organization_id, plan_id, razorpay_order_id, amount, status)
+               VALUES ($1, $2, $3, $4, 'created') RETURNING id`,
+               [organizationId, plan_id, order.id, planPrice]
+            );
+          } else {
+            throw insertErr;
+          }
         }
       }
 
@@ -516,8 +584,8 @@ const billingController = {
         `SELECT id, price_monthly, name FROM plans WHERE id = $1`,
         [txn.plan_id]
       );
-      const currentPrice = Number(currentPlanRes.rows[0]?.price_monthly || 0);
-      const newPrice = Number(newPlanRes.rows[0]?.price_monthly || 0);
+      const currentPrice = resolvePlanPrice(currentPlanRes.rows[0] || {});
+      const newPrice = resolvePlanPrice(newPlanRes.rows[0] || {});
       const isDowngrade = currentPlanRes.rows[0]?.id && newPrice < currentPrice;
       const quota = await creditService.getActiveQuota(txn.organization_id);
 
@@ -556,11 +624,11 @@ const billingController = {
 
         // Send plan change email (scheduled)
         try {
-          const plan = newPlanRes.rows[0] || {};
+          const plan = enrichPlanRecord(newPlanRes.rows[0] || {});
           await emailService.sendPlanChange({
             to: req.user?.email,
             plan_name: plan.name || 'Unknown Plan',
-            price_monthly: plan.price_monthly,
+            price_monthly: resolvePlanPrice(plan),
             payment_id: razorpay_payment_id,
             effective_date: effectiveDate,
             scheduled: true
@@ -605,11 +673,11 @@ const billingController = {
 
       // Send plan change email (best-effort)
       try {
-        const plan = newPlanRes.rows[0] || {};
+        const plan = enrichPlanRecord(newPlanRes.rows[0] || {});
         await emailService.sendPlanChange({
           to: req.user?.email,
           plan_name: plan.name || 'Unknown Plan',
-          price_monthly: plan.price_monthly,
+          price_monthly: resolvePlanPrice(plan),
           payment_id: razorpay_payment_id,
           scheduled: false
         });
@@ -716,22 +784,6 @@ const billingController = {
         return res.status(400).json({ error: 'Invoice already paid' });
       }
 
-      if (txn.razorpay_order_id) {
-        return res.json({
-          success: true,
-          order: {
-            id: txn.razorpay_order_id,
-            amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-            currency: 'INR',
-            key: process.env.RAZORPAY_KEY_ID
-          },
-          order_id: txn.razorpay_order_id,
-          amount: Number(txn.amount || txn.price_monthly || 0) * 100,
-          currency: 'INR',
-          key: process.env.RAZORPAY_KEY_ID
-        });
-      }
-
       const amount = Number(txn.amount || txn.price_monthly || 0);
       if (!amount) {
         return res.status(400).json({ error: 'Invoice amount not found' });
@@ -739,7 +791,7 @@ const billingController = {
 
       const order = await razorpay.orders.create({
         amount: amount * 100,
-        currency: 'INR',
+        currency: BILLING_CURRENCY,
         receipt: `rcpt_${Date.now()}`
       });
 

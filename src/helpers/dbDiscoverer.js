@@ -3,7 +3,17 @@ const mysql = require('mysql2/promise');
 
 const dbDiscoverer = {
   async getConnectionPool(connectionConfig) {
-  const { db_type, host, port, database_name, username, password, ssl = true } = connectionConfig;
+  const {
+    db_type,
+    host,
+    port,
+    database_name,
+    username,
+    password,
+    ssl,
+    ssl_enabled
+  } = connectionConfig;
+  const useSsl = ssl_enabled ?? ssl ?? true;
   
   switch (db_type.toLowerCase()) {
     case 'postgresql':
@@ -14,7 +24,7 @@ const dbDiscoverer = {
         database: database_name,
         user: username,
         password,
-        ssl: ssl ? {
+        ssl: useSsl ? {
           rejectUnauthorized: false // For self-signed certificates
         } : false,
         max: 5,

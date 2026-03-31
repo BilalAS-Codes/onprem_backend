@@ -12,10 +12,11 @@ const User = {
 
   async findById(id) {
     const result = await db.query(
-      'SELECT u.*, r.name as role_name, d.name as department_name ' +
+      'SELECT u.*, r.name as role_name, d.name as department_name, o.name as organization_name, o.name as organisation_name, o.name as organization ' +
       'FROM users u ' +
       'LEFT JOIN roles r ON u.role_id = r.id ' +
       'LEFT JOIN departments d ON u.department_id = d.id ' +
+      'LEFT JOIN organizations o ON u.organization_id = o.id ' +
       'WHERE u.id = $1',
       [id]
     );

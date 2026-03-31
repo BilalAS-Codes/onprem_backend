@@ -269,7 +269,50 @@ function formatSchemaInfoEntry(columnName, dataType, enumValues = []) {
     return entry;
 }
 
-async function buildSemanticContext(conn) {
+function parseDepartmentAccess(rawValue) {
+    if (rawValue == null) return { isAll: true, departmentIds: [] };
+
+    const normalized = String(rawValue).trim();
+    if (!normalized || normalized.toLowerCase() === 'all') {
+        return { isAll: true, departmentIds: [] };
+    }
+
+    try {
+        const parsed = JSON.parse(normalized);
+        if (Array.isArray(parsed)) {
+            return {
+                isAll: false,
+                departmentIds: parsed.map((value) => String(value).trim()).filter(Boolean)
+            };
+        }
+    } catch (error) {
+        // Fall back to comma-separated legacy format.
+    }
+
+    return {
+        isAll: false,
+        departmentIds: normalized
+            .split(',')
+            .map((value) => String(value).trim())
+            .filter(Boolean)
+    };
+}
+
+function canAccessColumnByDepartment(row, userContext = {}) {
+    const roleName = String(userContext.role || '').toLowerCase();
+    const isAdmin = roleName === 'admin' || roleName === 'super admin';
+    if (isAdmin) return true;
+
+    const { isAll, departmentIds } = parseDepartmentAccess(row.department_access);
+    if (isAll) return true;
+
+    const userDepartmentId = userContext.department_id ? String(userContext.department_id).trim() : '';
+    if (!userDepartmentId) return false;
+
+    return departmentIds.includes(userDepartmentId);
+}
+
+async function buildSemanticContext(conn, userContext = {}) {
     const schemaResult = await db.query(
         `SELECT
             st.table_name,
@@ -277,7 +320,8 @@ async function buildSemanticContext(conn) {
             sc.column_name,
             sc.data_type,
             sc.enum_values,
-            sc.is_enabled as column_enabled
+            sc.is_enabled as column_enabled,
+            sc.department_access
          FROM semantic_tables st
          JOIN semantic_columns sc ON st.id = sc.semantic_table_id
          WHERE st.connection_id = $1`,
@@ -311,7 +355,9 @@ async function buildSemanticContext(conn) {
         if (row.table_enabled) {
             if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
 
-            if (row.column_enabled) {
+            const hasDepartmentAccess = canAccessColumnByDepartment(row, userContext);
+
+            if (row.column_enabled && hasDepartmentAccess) {
                 if (!allowedColumns[tbl]) allowedColumns[tbl] = [];
                 allowedColumns[tbl].push(col);
             } else {
@@ -444,7 +490,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
             allowedColumns,
             restrictedColumns,
             relationships
-        } = await buildSemanticContext(conn);
+        } = await buildSemanticContext(conn, req.user);
 
         console.log(conn, 'this is conn')
         // 3. Construct Payload for External API
@@ -578,7 +624,7 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
             allowedColumns,
             restrictedColumns,
             relationships
-        } = await buildSemanticContext(conn);
+        } = await buildSemanticContext(conn, req.user);
 
         // 3. Construct Payload for External API
         const externalPayload = {
@@ -783,7 +829,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             allowedColumns,
             restrictedColumns,
             relationships
-        } = await buildSemanticContext(conn);
+        } = await buildSemanticContext(conn, req.user);
 
         const externalPayload = {
             db_config: {

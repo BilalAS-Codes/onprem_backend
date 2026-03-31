@@ -1,6 +1,7 @@
 // controllers/adminDashboard.controller.js
 const db = require('../config/database');
 const { testConnection } = require('../utils/dbConnection');
+const { enrichPlanRecord, resolvePlanPrice } = require('../utils/planCatalog');
 
 class AdminDashboardController {
   async getDashboard(req, res) {
@@ -83,7 +84,13 @@ class AdminDashboardController {
        WHERE o.id = $1`,
       [organizationId]
     );
-    return query.rows[0];
+    const row = query.rows[0];
+    if (!row) return row;
+    const enrichedPlan = enrichPlanRecord({ name: row.plan_name });
+    return {
+      ...row,
+      plan_name: enrichedPlan.name || row.plan_name
+    };
   }
 
   async getQuotaSummary(organizationId, range) {
@@ -351,8 +358,26 @@ class AdminDashboardController {
       [organizationId]
     );
 
+    const currentPlanRow = currentPlan.rows[0] || null;
+    const enrichedCurrentPlan = currentPlanRow
+      ? enrichPlanRecord({
+          ...currentPlanRow,
+          name: currentPlanRow.name
+        })
+      : null;
+
     return {
-      current_plan: currentPlan.rows[0] || null,
+      current_plan: enrichedCurrentPlan
+        ? {
+            ...currentPlanRow,
+            name: enrichedCurrentPlan.name,
+            price: resolvePlanPrice(enrichedCurrentPlan),
+            price_label: enrichedCurrentPlan.price_label || null,
+            price_label_ar: enrichedCurrentPlan.price_label_ar || null,
+            feature_list: enrichedCurrentPlan.feature_list || [],
+            feature_list_ar: enrichedCurrentPlan.feature_list_ar || []
+          }
+        : null,
       invoices: invoices.rows,
       payment_method: paymentMethod.rows[0] || { type: 'card', last4: '****', expiry_date: null, is_default: true }
     };

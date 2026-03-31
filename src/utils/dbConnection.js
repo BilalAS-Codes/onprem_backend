@@ -6,6 +6,10 @@ const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
 
 const testConnection = async (config) => {
   const startTime = Date.now();
+  const shouldRetryWithSsl =
+    config.db_type === 'postgresql' &&
+    !config.ssl_enabled;
+
   try {
     if (config.db_type === 'postgresql') {
       const client = new Client({
@@ -44,10 +48,16 @@ const testConnection = async (config) => {
   } catch (error) {
     const latency_ms = Date.now() - startTime;
 
-    // If postgres rejects plaintext connections (common on RDS: "no encryption"),
-    // and caller didn't explicitly enable SSL, try once more with SSL enabled.
     const msg = error && error.message ? error.message : '';
-    if (config.db_type === 'postgresql' && !config.ssl_enabled && /no encryption/i.test(msg)) {
+    const requiresSsl =
+      /no encryption/i.test(msg) ||
+      /ssl\/tls required/i.test(msg) ||
+      /ssl is required/i.test(msg) ||
+      /must use ssl/i.test(msg) ||
+      /pg_hba\.conf.*ssl/i.test(msg);
+
+    // If postgres rejects plaintext connections, retry once with SSL enabled.
+    if (shouldRetryWithSsl && requiresSsl) {
       try {
         const client = new Client({
           host: config.host,
