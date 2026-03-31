@@ -27,13 +27,45 @@ const Department = {
 
   async findByOrganization(organizationId) {
     const result = await db.query(
-      `SELECT d.*, 
+      `SELECT d.*,
               COUNT(DISTINCT u.id) as user_count,
-              COUNT(DISTINCT dp.table_name) as tables_count,
-              STRING_AGG(DISTINCT dp.table_name, ', ') as accessible_tables
+              COUNT(DISTINCT CASE
+                WHEN st.is_enabled = true
+                  AND sc.is_enabled = true
+                  AND (
+                    COALESCE(sc.department_access, 'all') = 'all'
+                    OR (
+                      LEFT(TRIM(COALESCE(sc.department_access, '')), 1) = '['
+                      AND EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements_text(sc.department_access::jsonb) AS dept_access(value)
+                        WHERE dept_access.value = d.id::text
+                      )
+                    )
+                  )
+                THEN st.table_name
+              END) as tables_count,
+              STRING_AGG(DISTINCT CASE
+                WHEN st.is_enabled = true
+                  AND sc.is_enabled = true
+                  AND (
+                    COALESCE(sc.department_access, 'all') = 'all'
+                    OR (
+                      LEFT(TRIM(COALESCE(sc.department_access, '')), 1) = '['
+                      AND EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements_text(sc.department_access::jsonb) AS dept_access(value)
+                        WHERE dept_access.value = d.id::text
+                      )
+                    )
+                  )
+                THEN st.table_name
+              END, ', ') as accessible_tables
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id AND u.status = 'active'
-       LEFT JOIN department_permissions dp ON d.id = dp.department_id
+       LEFT JOIN database_connections dc ON dc.organization_id = d.organization_id
+       LEFT JOIN semantic_tables st ON st.connection_id = dc.id
+       LEFT JOIN semantic_columns sc ON sc.semantic_table_id = st.id
        WHERE d.organization_id = $1
        GROUP BY d.id
        ORDER BY d.created_at DESC`,

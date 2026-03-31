@@ -17,6 +17,9 @@ const pool = new Pool({
     rejectUnauthorized: false, // Required for AWS RDS
     sslmode: 'require'
   } : false
+  // ssl: {
+  //   rejectUnauthorized: false
+  // }
 });
 
 // Test connection on startup

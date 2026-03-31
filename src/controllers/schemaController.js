@@ -2,6 +2,32 @@ const db = require('../config/database');
 const dbDiscoverer = require('../helpers/dbDiscoverer');
 const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
 
+const normalizeDepartmentAccessValue = (departmentAccess) => {
+  if (departmentAccess == null) return 'all';
+
+  const normalized = String(departmentAccess).trim();
+  if (!normalized || normalized.toLowerCase() === 'all') {
+    return 'all';
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(normalized);
+  } catch (error) {
+    throw new Error('department_access must be "all" or a valid JSON array of department ids');
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error('department_access must be "all" or a valid JSON array of department ids');
+  }
+
+  return JSON.stringify(
+    parsed
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+  );
+};
+
 const schemaController = {
   async getTables(req, res) {
   try {
@@ -1062,6 +1088,8 @@ async bulkUpdateColumnMappings(req, res) {
           continue;
         }
 
+        const normalizedDepartmentAccess = normalizeDepartmentAccessValue(department_access);
+
         const result = await db.query(
           `INSERT INTO semantic_columns (
             semantic_table_id, column_name, business_name, data_type,
@@ -1087,7 +1115,7 @@ async bulkUpdateColumnMappings(req, res) {
             is_nullable !== undefined ? is_nullable : true,
             default_value,
             JSON.stringify(Array.isArray(enum_values) ? enum_values : []),
-            department_access,
+            normalizedDepartmentAccess,
             is_enabled
           ]
         );
