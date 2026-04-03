@@ -894,6 +894,13 @@ async discoverAndSeedSchema(req, res) {
         }
       }
 
+      await db.query(
+        `UPDATE database_connections
+         SET last_synced_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [connectionId]
+      );
+
       const relationshipCountResult = await db.query(
         `SELECT COUNT(*)::int AS count
          FROM semantic_relationships

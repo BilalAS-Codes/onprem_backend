@@ -30,13 +30,33 @@ const userController = {
         status: 'invited'
       });
 
+      const inviterUser = await User.findById(invitedById);
+      const organizationResult = await db.query(
+        'SELECT name FROM organizations WHERE id = $1 LIMIT 1',
+        [organizationId]
+      );
+      const organizationName = (
+        req.user.organization_name ||
+        req.user.organisation_name ||
+        req.user.organization ||
+        inviterUser?.organization_name ||
+        organizationResult.rows[0]?.name ||
+        'your organization'
+      );
+      const invitedByName = (
+        req.user.full_name ||
+        inviterUser?.full_name ||
+        req.user.email ||
+        'your team'
+      );
+
       // Send invitation email
       await emailService.sendInvitation({
         to: email,
         full_name,
         tempPassword,
-        organization_name: req.user.organization_name,
-        invited_by: req.user.full_name
+        organization_name: organizationName,
+        invited_by: invitedByName
       });
 
       // Remove sensitive data from response
