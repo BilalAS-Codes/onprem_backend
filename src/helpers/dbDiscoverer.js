@@ -1,6 +1,41 @@
 const { Pool } = require('pg');
 const mysql = require('mysql2/promise');
 
+const normalizeEnumValues = (values) => {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const normalizedValues = [];
+  const seen = new Set();
+
+  for (const rawValue of values) {
+    if (rawValue == null) {
+      continue;
+    }
+
+    let value = String(rawValue).trim();
+
+    if (!value) {
+      continue;
+    }
+
+    value = value
+      .replace(/::[\w\s.\[\]\"]+$/g, '')
+      .replace(/^'+|'+$/g, '')
+      .trim();
+
+    if (!value || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    normalizedValues.push(value);
+  }
+
+  return normalizedValues;
+};
+
 const dbDiscoverer = {
   async getConnectionPool(connectionConfig) {
   const {
@@ -127,34 +162,102 @@ async discoverTables(pool, dbType) {
     try {
       if (dbType.toLowerCase() === 'postgresql' || dbType.toLowerCase() === 'postgres') {
         const result = await pool.query(`
+          WITH column_base AS (
+            SELECT
+              c.table_schema,
+              c.table_name,
+              c.column_name,
+              c.data_type,
+              c.udt_schema,
+              c.udt_name,
+              c.ordinal_position,
+              attr.attnum
+            FROM information_schema.columns c
+            JOIN pg_namespace table_ns
+              ON table_ns.nspname = c.table_schema
+            JOIN pg_class cls
+              ON cls.relname = c.table_name
+             AND cls.relnamespace = table_ns.oid
+            JOIN pg_attribute attr
+              ON attr.attrelid = cls.oid
+             AND attr.attname = c.column_name
+             AND attr.attnum > 0
+             AND NOT attr.attisdropped
+            WHERE c.table_name = $1
+              AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+          )
           SELECT
-            c.column_name,
-            c.data_type,
-            c.udt_name,
+            cb.column_name,
+            cb.data_type,
+            cb.udt_name,
             CASE
-              WHEN t.typtype = 'e' THEN ARRAY_AGG(e.enumlabel ORDER BY e.enumsortorder)
-              ELSE NULL
+              WHEN COALESCE(array_length(enum_values.values, 1), 0) > 0
+                OR COALESCE(array_length(check_values.values, 1), 0) > 0
+              THEN COALESCE(enum_values.values, ARRAY[]::text[]) || COALESCE(check_values.values, ARRAY[]::text[])
+              ELSE ARRAY[]::text[]
             END AS enum_values
-          FROM information_schema.columns c
-          LEFT JOIN pg_namespace n
-            ON n.nspname = c.udt_schema
-          LEFT JOIN pg_type t
-            ON t.typname = c.udt_name
-           AND t.typnamespace = n.oid
-          LEFT JOIN pg_enum e
-            ON e.enumtypid = t.oid
-          WHERE c.table_name = $1
-            AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
-          GROUP BY c.column_name, c.data_type, c.udt_name, c.ordinal_position, t.typtype
-          ORDER BY c.ordinal_position
+          FROM column_base cb
+          LEFT JOIN LATERAL (
+            SELECT ARRAY_AGG(e.enumlabel ORDER BY e.enumsortorder) AS values
+            FROM pg_namespace type_ns
+            JOIN pg_type t
+              ON t.typnamespace = type_ns.oid
+            JOIN pg_enum e
+              ON e.enumtypid = t.oid
+            WHERE type_ns.nspname = cb.udt_schema
+              AND t.typname = cb.udt_name
+              AND t.typtype = 'e'
+          ) enum_values ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT ARRAY_AGG(extracted.cleaned_value ORDER BY extracted.ord) AS values
+            FROM (
+              SELECT
+                ord,
+                NULLIF(
+                  BTRIM(
+                    REGEXP_REPLACE(TRIM(val), '::[A-Za-z0-9_ ."\\[\\]]+$', ''),
+                    '''" '
+                  ),
+                  ''
+                ) AS cleaned_value
+              FROM pg_constraint con
+              CROSS JOIN LATERAL UNNEST(
+                REGEXP_SPLIT_TO_ARRAY(
+                  CASE
+                    WHEN pg_get_constraintdef(con.oid) ~ 'ARRAY\\['
+                      THEN REGEXP_REPLACE(pg_get_constraintdef(con.oid), '.*ARRAY\\[(.*)\\].*', '\\1')
+                    WHEN pg_get_constraintdef(con.oid) ~ 'IN \\('
+                      THEN REGEXP_REPLACE(pg_get_constraintdef(con.oid), '.*IN \\((.*)\\).*', '\\1')
+                    ELSE ''
+                  END,
+                  ','
+                )
+              ) WITH ORDINALITY AS extracted_values(val, ord)
+              WHERE con.conrelid = (
+                SELECT cls.oid
+                FROM pg_class cls
+                JOIN pg_namespace ns
+                  ON ns.oid = cls.relnamespace
+                WHERE cls.relname = cb.table_name
+                  AND ns.nspname = cb.table_schema
+                LIMIT 1
+              )
+                AND con.contype = 'c'
+                AND cb.attnum = ANY(con.conkey)
+                AND (
+                  pg_get_constraintdef(con.oid) LIKE '%ARRAY[%'
+                  OR pg_get_constraintdef(con.oid) LIKE '%IN (%'
+                )
+            ) extracted
+            WHERE extracted.cleaned_value IS NOT NULL
+          ) check_values ON TRUE
+          ORDER BY cb.ordinal_position
         `, [tableName]);
 
         return result.rows.map((row) => ({
           column_name: row.column_name,
           data_type: row.data_type,
-          enum_values: Array.isArray(row.enum_values)
-            ? row.enum_values.filter((value) => value !== null)
-            : []
+          enum_values: normalizeEnumValues(row.enum_values)
         }));
       } else if (dbType.toLowerCase() === 'mysql') {
         const [rows] = await pool.query(`
@@ -184,7 +287,7 @@ async discoverTables(pool, dbType) {
           return {
             column_name: row.column_name,
             data_type: row.data_type,
-            enum_values: enumValues
+            enum_values: normalizeEnumValues(enumValues)
           };
         });
       }

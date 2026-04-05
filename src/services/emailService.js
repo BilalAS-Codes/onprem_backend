@@ -16,16 +16,19 @@ const emailService = {
   async sendInvitation({ to, full_name, tempPassword, organization_name, invited_by }) {
     const transporter = createTransporter();
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const safeOrganizationName = organization_name || 'your organization';
+    const safeInvitedBy = invited_by || 'your team';
+    const safeFullName = full_name || 'there';
 
     const mailOptions = {
       from: `"ZeroQueries" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
       to,
-      subject: `You've been invited to join ${organization_name} on ZeroQueries`,
+      subject: `You've been invited to join ${safeOrganizationName} on ZeroQueries`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2>Welcome to ZeroQueries!</h2>
-          <p>Hello ${full_name},</p>
-          <p>You've been invited by ${invited_by} to join ${organization_name} on ZeroQueries.</p>
+          <p>Hello ${safeFullName},</p>
+          <p>You've been invited by ${safeInvitedBy} to join ${safeOrganizationName} on ZeroQueries.</p>
           <p>Your temporary password is: <strong>${tempPassword}</strong></p>
           <p>Please login at: <a href="${frontendUrl}/login">${frontendUrl}/login</a></p>
           <p>For security reasons, please change your password after your first login.</p>
@@ -85,6 +88,36 @@ const emailService = {
           <p>Payment ID: <strong>${payment_id || 'N/A'}</strong></p>
           <br>
           <p>Thank you,<br>The ZeroQueries Team</p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+  },
+
+  async sendContactSalesInquiry({ to, requester_name, requester_email, organization_name, plan_name = 'Contact Sales' }) {
+    if (!to) return;
+
+    const transporter = createTransporter();
+    const safeRequesterName = requester_name || 'Unknown user';
+    const safeRequesterEmail = requester_email || 'Email unavailable';
+    const safeOrganizationName = organization_name || 'Unknown organization';
+    const safePlanName = plan_name || 'Contact Sales';
+
+    const mailOptions = {
+      from: `"ZeroQueries" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+      to,
+      subject: `Contact Sales Inquiry: ${safeRequesterName}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2>New Contact Sales Inquiry</h2>
+          <p>A logged-in user requested contact from the sales team.</p>
+          <p><strong>Name:</strong> ${safeRequesterName}</p>
+          <p><strong>Email:</strong> ${safeRequesterEmail}</p>
+          <p><strong>Organization:</strong> ${safeOrganizationName}</p>
+          <p><strong>Interested In:</strong> ${safePlanName}</p>
+          <br>
+          <p>Best regards,<br>The ZeroQueries Team</p>
         </div>
       `
     };

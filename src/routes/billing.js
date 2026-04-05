@@ -54,4 +54,8 @@ router.post('/subscription/reactivate',
   billingController.reactivateSubscription
 );
 
+router.post('/contact-sales',
+  billingController.contactSales
+);
+
 module.exports = router;

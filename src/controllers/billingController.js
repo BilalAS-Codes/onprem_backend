@@ -205,6 +205,61 @@ const applyDuePlanChanges = async (organizationId) => {
 };
 
 const billingController = {
+  async contactSales(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const userId = req.user.id;
+
+      const [requester, organization] = await Promise.all([
+        db.query(
+          `SELECT full_name, email
+           FROM users
+           WHERE id = $1
+           LIMIT 1`,
+          [userId]
+        ),
+        db.query(
+          `SELECT name
+           FROM organizations
+           WHERE id = $1
+           LIMIT 1`,
+          [organizationId]
+        )
+      ]);
+
+      const requesterRow = requester.rows[0] || {};
+      const organizationRow = organization.rows[0] || {};
+      const salesEmail =
+        process.env.SALES_EMAIL ||
+        process.env.CONTACT_SALES_EMAIL ||
+        process.env.SMTP_USER;
+
+      if (!salesEmail) {
+        return res.status(500).json({ error: 'Sales email is not configured' });
+      }
+
+      await emailService.sendContactSalesInquiry({
+        to: salesEmail,
+        requester_name: req.user.full_name || requesterRow.full_name,
+        requester_email: req.user.email || requesterRow.email,
+        organization_name:
+          req.user.organization_name ||
+          req.user.organisation_name ||
+          req.user.organization ||
+          organizationRow.name,
+        plan_name: 'Contact Sales'
+      });
+
+      res.json({
+        success: true,
+        message: 'Your contact sales request has been sent successfully.'
+      });
+    } catch (error) {
+      console.error('Contact sales error:', error);
+      res.status(500).json({ error: 'Failed to send contact sales request' });
+    }
+  },
+
   async getCurrentPlan(req, res) {
     try {
       const organizationId = req.user.organization_id;
