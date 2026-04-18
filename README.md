@@ -1,4 +1,4 @@
-# ZeroQueries API Documentation
+# ZeroQueries API Documentation ..
 
 ## 📋 Overview
 ZeroQueries is a B2B SaaS platform that allows organizations to query their databases using natural language. This document covers all API endpoints and the user flow for the platform.
