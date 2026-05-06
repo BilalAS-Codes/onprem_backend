@@ -25,7 +25,8 @@ const departmentController = {
   async getAll(req, res) {
     try {
       const organizationId = req.user.organization_id;
-      const departments = await Department.findByOrganization(organizationId);
+      const { source_type } = req.query;
+      const departments = await Department.findByOrganization(organizationId, source_type);
 
       res.json({
         success: true,

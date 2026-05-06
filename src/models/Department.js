@@ -25,7 +25,19 @@ const Department = {
     return result.rows[0];
   },
 
-  async findByOrganization(organizationId) {
+  async findByOrganization(organizationId, sourceType) {
+    let joinCondition = `(
+         st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id) OR
+         st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)
+       )`;
+       
+    if (sourceType === 'excel') {
+      joinCondition = `st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)`;
+    } else if (sourceType && sourceType !== 'all') {
+      // For any database type (postgresql, mysql, snowflake, bigquery), filter by connection_id
+      joinCondition = `st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id)`;
+    }
+
     const result = await db.query(
       `SELECT d.*,
               COUNT(DISTINCT u.id) as user_count,
@@ -63,8 +75,7 @@ const Department = {
               END, ', ') as accessible_tables
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id AND u.status = 'active'
-       LEFT JOIN database_connections dc ON dc.organization_id = d.organization_id
-       LEFT JOIN semantic_tables st ON st.connection_id = dc.id
+       LEFT JOIN semantic_tables st ON ${joinCondition}
        LEFT JOIN semantic_columns sc ON sc.semantic_table_id = st.id
        WHERE d.organization_id = $1
        GROUP BY d.id

@@ -141,6 +141,157 @@ function redactPayloadForLog(payload) {
     };
 }
 
+function logExternalApiResponse(label, payload) {
+    console.log(label);
+    console.dir(payload, { depth: null, maxArrayLength: null });
+}
+
+async function getActiveSourceConfig(organizationId) {
+    // 1. Fetch organization's pinned preference
+    const orgResult = await db.query(
+        'SELECT active_source_id, active_source_type FROM organizations WHERE id = $1',
+        [organizationId]
+    );
+    const pref = orgResult.rows[0];
+
+    let conn = null;
+    let isFileSource = false;
+
+    // Handle Excel as a multi-file source for the entire organization
+    if (pref && pref.active_source_type === 'excel') {
+        isFileSource = true;
+        conn = { 
+            id: 'multi-file-source', 
+            organization_id: organizationId,
+            source_type: 'excel' 
+        };
+        return { conn, isFileSource };
+    }
+
+    if (pref && pref.active_source_id) {
+        const dbResult = await db.query(
+            'SELECT * FROM database_connections WHERE id = $1 AND organization_id = $2',
+            [pref.active_source_id, organizationId]
+        );
+        if (dbResult.rows.length) {
+            conn = dbResult.rows[0];
+        }
+    }
+
+    // Fallback logic
+    if (!conn) {
+        const dbResult = await db.query(
+            'SELECT * FROM database_connections WHERE organization_id = $1 AND status = $2 LIMIT 1',
+            [organizationId, 'connected']
+        );
+        if (dbResult.rows.length) {
+            conn = dbResult.rows[0];
+        } else {
+            const fileResult = await db.query(
+                'SELECT * FROM file_sources WHERE organization_id = $1 AND status = $2 LIMIT 1',
+                [organizationId, 'active']
+            );
+            if (fileResult.rows.length) {
+                isFileSource = true;
+                conn = { 
+                    id: 'multi-file-source', 
+                    organization_id: organizationId,
+                    source_type: 'excel' 
+                };
+            }
+        }
+    }
+
+    return { conn, isFileSource };
+}
+
+async function buildExternalPayload({
+    conn,
+    isFileSource,
+    organization_id,
+    question,
+    max_rows,
+    role,
+    locale = 'en',
+    include_insights = true,
+    include_visualizations = true,
+    schemaContext
+}) {
+    const {
+        schemaInfo,
+        allowedTables,
+        disallowedTables,
+        allowedColumns,
+        restrictedColumns,
+        relationships
+    } = schemaContext;
+
+    if (isFileSource) {
+        // Build Excel Payload
+        const allFilesResult = await db.query(
+            'SELECT s3_key FROM file_sources WHERE organization_id = $1 AND status = $2',
+            [organization_id, 'active']
+        );
+        const awsPaths = allFilesResult.rows.map(f => `s3://${process.env.AWS_S3_BUCKET || 'zeroqueries'}/${f.s3_key}`);
+
+        return {
+            db_config: {
+                type: 'sheets',
+                aws_paths: awsPaths,
+                load_all_sheets: true,
+                schema_info: schemaInfo,
+                relationships
+            },
+            access_policy: {
+                role: role.toLowerCase(),
+                allowed_tables: allowedTables,
+                disallowed_tables: disallowedTables,
+                allowed_columns: allowedColumns,
+                restricted_columns: restrictedColumns,
+                max_rows: 1000,
+                query_timeout_seconds: 30
+            },
+            question: question,
+            response_format: 'general',
+            max_rows: max_rows,
+            locale: locale,
+            include_insights: include_insights,
+            include_visualizations: include_visualizations
+        };
+    } else {
+        // Build SQL Payload
+        return {
+            db_config: {
+                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
+                connection_string: constructConnectionString(conn),
+                host: conn.host,
+                port: parseInt(conn.port),
+                database: conn.database_name,
+                username: conn.username,
+                password: conn.password,
+                schema_info: schemaInfo,
+                relationships
+            },
+            access_policy: {
+                role: role.toLowerCase(),
+                allowed_tables: allowedTables,
+                disallowed_tables: disallowedTables,
+                allowed_columns: allowedColumns,
+                restricted_columns: restrictedColumns,
+                row_level_filters: {},
+                max_rows: 1000,
+                query_timeout_seconds: 30
+            },
+            question: question,
+            response_format: "general",
+            max_rows: max_rows,
+            locale: locale,
+            include_insights: include_insights,
+            include_visualizations: include_visualizations
+        };
+    }
+}
+
 async function logAnalysisApiCall({
     organizationId = null,
     userId = null,
@@ -313,20 +464,37 @@ function canAccessColumnByDepartment(row, userContext = {}) {
 }
 
 async function buildSemanticContext(conn, userContext = {}) {
-    const schemaResult = await db.query(
-        `SELECT
+    const isMultiFile = conn.id === 'multi-file-source';
+    
+    const schemaQuery = isMultiFile
+        ? `SELECT
             st.table_name,
             st.is_enabled as table_enabled,
             sc.column_name,
             sc.data_type,
             sc.enum_values,
             sc.is_enabled as column_enabled,
-            sc.department_access
-         FROM semantic_tables st
-         JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-         WHERE st.connection_id = $1`,
-        [conn.id]
-    );
+            sc.department_access,
+            fs.filename as file_source_name
+          FROM semantic_tables st
+          JOIN semantic_columns sc ON st.id = sc.semantic_table_id
+          JOIN file_sources fs ON st.file_source_id = fs.id
+          WHERE fs.organization_id = $1 AND fs.status = 'active'`
+        : `SELECT
+            st.table_name,
+            st.is_enabled as table_enabled,
+            sc.column_name,
+            sc.data_type,
+            sc.enum_values,
+            sc.is_enabled as column_enabled,
+            sc.department_access,
+            fs.filename as file_source_name
+          FROM semantic_tables st
+          JOIN semantic_columns sc ON st.id = sc.semantic_table_id
+          LEFT JOIN file_sources fs ON st.file_source_id = fs.id
+          WHERE st.connection_id = $1 OR st.file_source_id = $1`;
+
+    const schemaResult = await db.query(schemaQuery, [isMultiFile ? conn.organization_id : conn.id]);
 
     const schemaInfo = {};
     const allowedTables = [];
@@ -336,23 +504,29 @@ async function buildSemanticContext(conn, userContext = {}) {
     const tableColumnTypes = {};
 
     schemaResult.rows.forEach((row) => {
-        const tbl = row.table_name;
+        let tbl = row.table_name;
+        // Handle collisions for file-based sources with generic sheet names
+        const isGenericSheet = ["Sheet1", "CSV", "Worksheet", "Sheet 1", "Sheet"].includes(tbl);
+        if (isMultiFile && isGenericSheet && row.file_source_name) {
+            tbl = row.file_source_name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_");
+        }
+
         const col = row.column_name;
         const dataType = row.data_type;
 
-        if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
-        if (!tableColumnTypes[tbl]) tableColumnTypes[tbl] = {};
-        tableColumnTypes[tbl][col] = dataType;
-
-        schemaInfo[tbl].push(
-            formatSchemaInfoEntry(
-                col,
-                dataType,
-                Array.isArray(row.enum_values) ? row.enum_values : []
-            )
-        );
-
         if (row.table_enabled) {
+            if (!schemaInfo[tbl]) schemaInfo[tbl] = [];
+            if (!tableColumnTypes[tbl]) tableColumnTypes[tbl] = {};
+            tableColumnTypes[tbl][col] = dataType;
+
+            schemaInfo[tbl].push(
+                formatSchemaInfoEntry(
+                    col,
+                    dataType,
+                    Array.isArray(row.enum_values) ? row.enum_values : []
+                )
+            );
+
             if (!allowedTables.includes(tbl)) allowedTables.push(tbl);
 
             const hasDepartmentAccess = canAccessColumnByDepartment(row, userContext);
@@ -372,22 +546,41 @@ async function buildSemanticContext(conn, userContext = {}) {
     const relationships = [];
 
     try {
-        const storedRelationshipsResult = await db.query(
-            `SELECT source_table, source_column, target_table, target_column
-             FROM semantic_relationships
-             WHERE connection_id = $1
-             ORDER BY source_table, source_column, target_table, target_column`,
-            [conn.id]
-        );
+        const isMultiFile = conn.id === 'multi-file-source';
+        const relQuery = isMultiFile
+            ? `SELECT sr.source_table, sr.source_column, sr.target_table, sr.target_column, fs.filename as file_source_name 
+               FROM semantic_relationships sr
+               JOIN file_sources fs ON sr.file_source_id = fs.id
+               WHERE fs.organization_id = $1 AND fs.status = 'active'`
+            : (conn.source_type === 'excel'
+                ? 'SELECT sr.source_table, sr.source_column, sr.target_table, sr.target_column, fs.filename as file_source_name FROM semantic_relationships sr JOIN file_sources fs ON sr.file_source_id = fs.id WHERE sr.file_source_id = $1'
+                : 'SELECT source_table, source_column, target_table, target_column FROM semantic_relationships WHERE connection_id = $1');
+        
+        const storedRelationshipsResult = await db.query(relQuery, [isMultiFile ? conn.organization_id : conn.id]);
 
         storedRelationshipsResult.rows.forEach((relationship) => {
             if (!relationship?.source_table || !relationship?.source_column || !relationship?.target_table || !relationship?.target_column) {
                 return;
             }
 
+            let srcTbl = relationship.source_table;
+            let tgtTbl = relationship.target_table;
+
+            const isGenericSrc = ["Sheet1", "CSV", "Worksheet", "Sheet 1", "Sheet"].includes(srcTbl);
+            const isGenericTgt = ["Sheet1", "CSV", "Worksheet", "Sheet 1", "Sheet"].includes(tgtTbl);
+
+            if (isMultiFile && relationship.file_source_name) {
+                if (isGenericSrc) {
+                    srcTbl = relationship.file_source_name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_");
+                }
+                if (isGenericTgt) {
+                    tgtTbl = relationship.file_source_name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_");
+                }
+            }
+
             relationships.push({
-                from_field: `${relationship.source_table}.${relationship.source_column}`,
-                to_field: `${relationship.target_table}.${relationship.target_column}`
+                from_field: `${srcTbl}.${relationship.source_column}`,
+                to_field: `${tgtTbl}.${relationship.target_column}`
             });
         });
     } catch (storedRelationshipError) {
@@ -459,7 +652,37 @@ async function buildSemanticContext(conn, userContext = {}) {
  * POST /api/v1/analyze
  * Proxies the request to the external AI Analysis service with full context
  */
+/**
+ * @openapi
+ * /v1/analyze:
+ *   post:
+ *     summary: Ask a natural language question about your data
+ *     tags: [Analysis]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - question
+ *             properties:
+ *               question:
+ *                 type: string
+ *                 example: "What are the total sales this month?"
+ *               max_rows:
+ *                 type: integer
+ *                 default: 100
+ *     responses:
+ *       200:
+ *         description: AI analysis result
+ *       400:
+ *         description: Bad request
+ */
 router.post('/analyze', authenticateToken, async (req, res) => {
+
     const { question, max_rows = 100 } = req.body;
     const { organization_id, role, id: user_id } = req.user;
     const startedAt = Date.now();
@@ -471,57 +694,23 @@ router.post('/analyze', authenticateToken, async (req, res) => {
     }
 
     try {
-        // 1. Fetch active database connection
-        const connectionResult = await db.query(
-            'SELECT * FROM database_connections WHERE organization_id = $1 AND status = $2 LIMIT 1',
-            [organization_id, 'connected']
-        );
-
-        if (!connectionResult.rows.length) {
-            return res.status(404).json({ success: false, error: 'No active database connection found for your organization.' });
+        const { conn, isFileSource } = await getActiveSourceConfig(organization_id);
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No active source found.' });
         }
 
-        const conn = connectionResult.rows[0];
+        const schemaContext = await buildSemanticContext(conn, req.user);
 
-        const {
-            schemaInfo,
-            allowedTables,
-            disallowedTables,
-            allowedColumns,
-            restrictedColumns,
-            relationships
-        } = await buildSemanticContext(conn, req.user);
-
-        console.log(conn, 'this is conn')
         // 3. Construct Payload for External API
-        const externalPayload = {
-            db_config: {
-                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                connection_string: constructConnectionString(conn),
-                host: conn.host,
-                port: parseInt(conn.port),
-                database: conn.database_name,
-                username: conn.username,
-                password: conn.password,
-                schema_info: schemaInfo,
-                relationships
-            },
-            access_policy: {
-                role: role.toLowerCase(),
-                allowed_tables: allowedTables,
-                disallowed_tables: disallowedTables,
-                allowed_columns: allowedColumns,
-                restricted_columns: restrictedColumns,
-                row_level_filters: {},
-                max_rows: 1000,
-                query_timeout_seconds: 30
-            },
-            question: question,
-            response_format: "general",
-            max_rows: max_rows,
-            include_insights: true,
-            include_visualizations: true
-        };
+        const externalPayload = await buildExternalPayload({
+            conn,
+            isFileSource,
+            organization_id,
+            question,
+            max_rows,
+            role,
+            schemaContext
+        });
 
         console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
         console.dir({
@@ -549,6 +738,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         // 5. Return the result from the external API to our frontend
         console.log('✅ [ANALYZE] Returning analysis results to frontend');
+        logExternalApiResponse('📥 [ANALYZE] External Analysis API response:', response.data);
 
         await logAnalysisApiCall({
             organizationId: organization_id,
@@ -605,55 +795,37 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
     }
 
     try {
-        // 1. Fetch active database connection
-        const connectionResult = await db.query(
-            'SELECT * FROM database_connections WHERE organization_id = $1 AND status = $2 LIMIT 1',
-            [organization_id, 'connected']
-        );
-
-        if (!connectionResult.rows.length) {
-            return res.status(404).json({ success: false, error: 'No active database connection found for your organization.' });
+        // 1. Fetch active source (Respecting pinned preference)
+        const { conn, isFileSource } = await getActiveSourceConfig(organization_id);
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No active source found.' });
         }
 
-        const conn = connectionResult.rows[0];
+        const schemaContext = await buildSemanticContext(conn, req.user);
 
-        const {
-            schemaInfo,
-            allowedTables,
-            disallowedTables,
-            allowedColumns,
-            restrictedColumns,
-            relationships
-        } = await buildSemanticContext(conn, req.user);
+        // 3. Construct Payload for External API (Special case for suggest-queries)
+        const basePayload = await buildExternalPayload({
+            conn,
+            isFileSource,
+            organization_id,
+            question: original_question,
+            max_rows: 100,
+            role,
+            locale,
+            schemaContext
+        });
 
-        // 3. Construct Payload for External API
         const externalPayload = {
-            db_config: {
-                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                connection_string: constructConnectionString(conn),
-                host: conn.host,
-                port: parseInt(conn.port),
-                database: conn.database_name,
-                username: conn.username,
-                password: conn.password,
-                schema_info: schemaInfo,
-                relationships
-            },
-            access_policy: {
-                role: role.toLowerCase(),
-                allowed_tables: allowedTables,
-                disallowed_tables: disallowedTables,
-                allowed_columns: allowedColumns,
-                restricted_columns: restrictedColumns,
-                row_level_filters: {},
-                max_rows: 1000,
-                query_timeout_seconds: 30
-            },
+            ...basePayload,
             original_question: original_question,
             num_suggestions: num_suggestions,
-            locale: locale,
             context: req.body.context || {}
         };
+        delete externalPayload.question;
+        delete externalPayload.response_format;
+        delete externalPayload.max_rows;
+        delete externalPayload.include_insights;
+        delete externalPayload.include_visualizations;
 
         console.log('🎯 [SUGGEST] Forwarding suggest-queries request to External API...');
         console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
@@ -810,56 +982,26 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
     }
 
     try {
-        // reuse same connection & schema lookup logic as /analyze
-        const connectionResult = await db.query(
-            'SELECT * FROM database_connections WHERE organization_id = $1 AND status = $2 LIMIT 1',
-            [organization_id, 'connected']
-        );
-
-        if (!connectionResult.rows.length) {
-            return res.status(404).json({ success: false, error: 'No active database connection found for your organization.' });
+        // 1. Fetch active source (Respecting pinned preference)
+        const { conn, isFileSource } = await getActiveSourceConfig(organization_id);
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No active source found.' });
         }
 
-        const conn = connectionResult.rows[0];
+        const schemaContext = await buildSemanticContext(conn, req.user);
 
-        const {
-            schemaInfo,
-            allowedTables,
-            disallowedTables,
-            allowedColumns,
-            restrictedColumns,
-            relationships
-        } = await buildSemanticContext(conn, req.user);
-
-        const externalPayload = {
-            db_config: {
-                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                connection_string: constructConnectionString(conn),
-                host: conn.host,
-                port: parseInt(conn.port),
-                database: conn.database_name,
-                username: conn.username,
-                password: conn.password,
-                schema_info: schemaInfo,
-                relationships
-            },
-            access_policy: {
-                role: role.toLowerCase(),
-                allowed_tables: allowedTables,
-                disallowed_tables: disallowedTables,
-                allowed_columns: allowedColumns,
-                restricted_columns: restrictedColumns,
-                row_level_filters: {},
-                max_rows: 1000,
-                query_timeout_seconds: 30
-            },
-            question: question,
-            response_format: "general",
-            max_rows: max_rows,
-            locale: locale,
-            include_insights: include_insights,
-            include_visualizations: include_visualizations
-        };
+        const externalPayload = await buildExternalPayload({
+            conn,
+            isFileSource,
+            organization_id,
+            question,
+            max_rows,
+            role,
+            locale,
+            include_insights,
+            include_visualizations,
+            schemaContext
+        });
 
         // build webhook URL with conversation_id query param
         const webhookUrl = `${req.protocol}://${req.get('host')}/api/v1/webhook?conversation_id=${encodeURIComponent(conversation_id)}`;
@@ -877,6 +1019,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             },
             timeout: 45000
         });
+        logExternalApiResponse('📥 [ASYNC ANALYZE] External Analysis API response:', response.data);
 
         await logAnalysisApiCall({
             organizationId: organization_id,
@@ -963,17 +1106,32 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
             [organization_id, 'connected']
         );
 
-        if (!connectionResult.rows.length) {
-            return res.status(404).json({ success: false, error: 'No active database connection found for your organization.' });
-        }
+        
 
-        const conn = connectionResult.rows[0];
+        let conn = null;
+        let isFileSource = false;
+        if (connectionResult.rows.length) {
+            conn = connectionResult.rows[0];
+        } else {
+            const fileResult = await db.query(
+                'SELECT * FROM file_sources WHERE organization_id = $1 AND status = $2 LIMIT 1',
+                [organization_id, 'active']
+            );
+            if (fileResult.rows.length) {
+                conn = fileResult.rows[0];
+                isFileSource = true;
+                conn.source_type = 'excel';
+            }
+        }
+        if (!conn) {
+            return res.status(404).json({ success: false, error: 'No active source found.' });
+        }
 
         const schemaResult = await db.query(
             `SELECT st.table_name, st.is_enabled as table_enabled, sc.column_name, sc.is_enabled as column_enabled
              FROM semantic_tables st
              JOIN semantic_columns sc ON st.id = sc.semantic_table_id
-             WHERE st.connection_id = $1`,
+             WHERE st.connection_id = $1 OR st.file_source_id = $1`,
             [conn.id]
         );
 
@@ -1146,6 +1304,7 @@ router.get('/task/:taskId/status', authenticateToken, async (req, res) => {
             }
         });
 
+        logExternalApiResponse(`📥 [TASK STATUS] External API response for ${taskId}:`, response.data);
         res.json(response.data);
     } catch (error) {
         console.error(' [TASK STATUS] Proxy Error:', error.response?.data || error.message);
@@ -1175,6 +1334,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
             }
         });
 
+        logExternalApiResponse(`📥 [TASK RESULT] External API response for ${taskId}:`, response.data);
         res.json(response.data);
     } catch (error) {
         console.error('[TASK RESULT] Proxy Error:', error.response?.data || error.message);

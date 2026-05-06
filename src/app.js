@@ -3,6 +3,9 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 require('dotenv').config();
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+
 
 
 // Import routes
@@ -60,6 +63,10 @@ app.use('/api', userRoutes);
 app.use('/api/', questionsRoutes)
 app.use('/api/v1', analysisRoutes);
 app.use('/api/v1/chats', chatRoutes);
+
+// Swagger Documentation
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
 
 // Background jobs
 startRaiseInvoicesJob();

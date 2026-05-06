@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const dbDiscoverer = require('../helpers/dbDiscoverer');
+const fileDiscoverer = require('../helpers/fileDiscoverer');
 const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
 
 const normalizeDepartmentAccessValue = (departmentAccess) => {
@@ -36,55 +37,52 @@ const schemaController = {
 
     await ensureSchemaMetadataStorage(db);
 
-    // Validate connectionId is a valid UUID format
-    if (!connectionId || typeof connectionId !== 'string' || connectionId === 'null') {
+    const isMultiFile = connectionId === 'multi-file-source';
+
+    if (!isMultiFile && (!connectionId || typeof connectionId !== 'string' || connectionId === 'null')) {
       return res.status(400).json({ error: 'Invalid connection ID' });
     }
 
-    // Verify connection belongs to organization
-    const connectionCheck = await db.query(
-      'SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2',
-      [connectionId, organizationId]
-    );
+    let tablesQuery;
+    let queryParams;
 
-    if (!connectionCheck.rows[0]) {
-      return res.status(404).json({ error: 'Database connection not found' });
+    if (isMultiFile) {
+      tablesQuery = `
+        SELECT
+            st.*,
+            fs.filename as source_filename,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id) AS column_count,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id AND sc.is_enabled = true) AS enabled_columns,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id AND sc.enum_values IS NOT NULL AND jsonb_typeof(sc.enum_values) = 'array' AND jsonb_array_length(sc.enum_values) > 0) AS enum_column_count,
+            (SELECT COUNT(*) FROM semantic_relationships sr WHERE sr.file_source_id = st.file_source_id AND sr.source_table = st.table_name) AS relationship_count
+        FROM semantic_tables st
+        JOIN file_sources fs ON st.file_source_id = fs.id
+        WHERE fs.organization_id = $1 AND fs.status = 'active' AND st.is_enabled = true
+        ORDER BY fs.filename, st.table_name`;
+      queryParams = [organizationId];
+    } else {
+      tablesQuery = `
+        SELECT
+            st.*,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id) AS column_count,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id AND sc.is_enabled = true) AS enabled_columns,
+            (SELECT COUNT(*) FROM semantic_columns sc WHERE sc.semantic_table_id = st.id AND sc.enum_values IS NOT NULL AND jsonb_typeof(sc.enum_values) = 'array' AND jsonb_array_length(sc.enum_values) > 0) AS enum_column_count,
+            (SELECT COUNT(*) FROM semantic_relationships sr WHERE (sr.connection_id = st.connection_id OR sr.file_source_id = st.file_source_id) AND sr.source_table = st.table_name) AS relationship_count
+        FROM semantic_tables st
+        WHERE (st.connection_id = $1 OR st.file_source_id = $1) AND st.is_enabled = true
+        ORDER BY st.table_name`;
+      queryParams = [connectionId];
+      
+      const sourceCheck = await db.query(
+        `SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2
+         UNION ALL
+         SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2`,
+        [connectionId, organizationId]
+      );
+      if (sourceCheck.rows.length === 0) return res.status(404).json({ error: 'Data source not found' });
     }
 
-    // Get tables from YOUR semantic_tables table (which now has the actual schema)
-    const result = await db.query(
-      `SELECT
-          st.*,
-          (
-            SELECT COUNT(*)
-            FROM semantic_columns sc
-            WHERE sc.semantic_table_id = st.id
-          ) AS column_count,
-          (
-            SELECT COUNT(*)
-            FROM semantic_columns sc
-            WHERE sc.semantic_table_id = st.id
-              AND sc.is_enabled = true
-          ) AS enabled_columns,
-          (
-            SELECT COUNT(*)
-            FROM semantic_columns sc
-            WHERE sc.semantic_table_id = st.id
-              AND sc.enum_values IS NOT NULL
-              AND jsonb_typeof(sc.enum_values) = 'array'
-              AND jsonb_array_length(sc.enum_values) > 0
-          ) AS enum_column_count,
-          (
-            SELECT COUNT(*)
-            FROM semantic_relationships sr
-            WHERE sr.connection_id = st.connection_id
-              AND sr.source_table = st.table_name
-          ) AS relationship_count
-       FROM semantic_tables st
-       WHERE st.connection_id = $1 AND st.is_enabled = true
-       ORDER BY st.table_name`,
-      [connectionId]
-    );
+    const result = await db.query(tablesQuery, queryParams);
 
     res.json({
       success: true,
@@ -102,23 +100,44 @@ const schemaController = {
 
     await ensureSchemaMetadataStorage(db);
 
-    // Verify connection and fetch config
-    const connectionResult = await db.query(
-      'SELECT * FROM database_connections WHERE id = $1 AND organization_id = $2',
-      [connectionId, organizationId]
-    );
+    const isMultiFile = connectionId === 'multi-file-source';
 
-    if (!connectionResult.rows[0]) {
-      return res.status(404).json({ error: 'Database connection not found' });
+    let tableQuery;
+    let queryParams;
+
+    if (isMultiFile) {
+      tableQuery = `
+        SELECT st.id FROM semantic_tables st
+        JOIN file_sources fs ON st.file_source_id = fs.id
+        WHERE fs.organization_id = $1 AND fs.status = 'active' AND TRIM(st.table_name) = TRIM($2)
+        LIMIT 1`;
+      queryParams = [organizationId, tableName];
+    } else {
+      tableQuery = `
+        SELECT id FROM semantic_tables 
+        WHERE (connection_id = $1 OR file_source_id = $1) AND TRIM(table_name) = TRIM($2)`;
+      queryParams = [connectionId, tableName];
+
+      const sourceCheck = await db.query(
+        `SELECT id FROM database_connections WHERE id = $1 AND organization_id = $2
+         UNION ALL
+         SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2`,
+        [connectionId, organizationId]
+      );
+      if (sourceCheck.rows.length === 0) return res.status(404).json({ error: 'Data source not found' });
     }
-    const dbConfig = connectionResult.rows[0];
 
-    // Get semantic_table_id first
-    const tableResult = await db.query(
-      `SELECT id FROM semantic_tables 
-       WHERE connection_id = $1 AND TRIM(table_name) = TRIM($2)`,
-      [connectionId, tableName]
-    );
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tableName);
+    let tableResult;
+
+    if (isUuid) {
+      tableResult = await db.query(
+        'SELECT id FROM semantic_tables WHERE id = $1',
+        [tableName]
+      );
+    } else {
+      tableResult = await db.query(tableQuery, queryParams);
+    }
 
     if (tableResult.rows.length === 0) {
       return res.status(404).json({ 
@@ -129,18 +148,35 @@ const schemaController = {
 
     const semanticTableId = tableResult.rows[0].id;
 
-    // Query columns directly using semantic_table_id
     const result = await db.query(
-      `SELECT sc.*, st.table_name
+      `SELECT 
+        sc.*, 
+        st.table_name,
+        sr.target_table as foreign_table,
+        sr.target_column as foreign_column
        FROM semantic_columns sc
        JOIN semantic_tables st ON sc.semantic_table_id = st.id
+       LEFT JOIN semantic_relationships sr ON 
+         sr.source_table = st.table_name AND 
+         sr.source_column = sc.column_name AND
+         sr.connection_id IS NOT DISTINCT FROM st.connection_id AND 
+         sr.file_source_id IS NOT DISTINCT FROM st.file_source_id
        WHERE sc.semantic_table_id = $1
        ORDER BY sc.column_name`,
       [semanticTableId]
     );
 
+    // For database connections, fetch config for live enum discovery
+    let dbConfig = null;
+    if (!isMultiFile) {
+        const dbRes = await db.query('SELECT * FROM database_connections WHERE id = $1 AND organization_id = $2', [connectionId, organizationId]);
+        if (dbRes.rows.length > 0) {
+            dbConfig = dbRes.rows[0];
+        }
+    }
+
     let liveEnumValueMap = new Map();
-    if (result.rows.some((col) => !Array.isArray(col.enum_values) || col.enum_values.length === 0)) {
+    if (dbConfig && result.rows.some((col) => !Array.isArray(col.enum_values) || col.enum_values.length === 0)) {
       try {
         const pool = await dbDiscoverer.getConnectionPool(dbConfig);
         try {
@@ -163,75 +199,11 @@ const schemaController = {
       }
     }
 
-    let relationships = [];
-    try {
-      const relationshipResult = await db.query(
-        `SELECT
-            source_table,
-            source_column,
-            target_table,
-            target_column,
-            relation_type
-         FROM semantic_relationships
-         WHERE connection_id = $1
-           AND (source_table = $2 OR target_table = $2)
-         ORDER BY source_table, source_column, target_table, target_column`,
-        [connectionId, tableName]
-      );
-      relationships = relationshipResult.rows;
-    } catch (fkError) {
-      console.warn('Stored relationship lookup failed:', fkError.message);
-    }
 
-    if (relationships.length === 0) {
-      try {
-        const pool = await dbDiscoverer.getConnectionPool(dbConfig);
-        try {
-          const foreignKeys = await dbDiscoverer.discoverForeignKeys(
-            pool,
-            dbConfig.db_type,
-            tableName
-          );
-          relationships = foreignKeys.map((fk) => ({
-            source_table: tableName,
-            source_column: String(fk.column_name),
-            target_table: fk.foreign_table,
-            target_column: fk.foreign_column,
-            relation_type: 'foreign_key'
-          }));
-        } finally {
-          await pool.end();
-        }
-      } catch (fkError) {
-        console.warn('Foreign key discovery failed:', fkError.message);
-      }
-    }
-
-    const foreignKeyMap = new Map(
-      relationships
-        .filter((relationship) => relationship.source_table === tableName)
-        .map((relationship) => [String(relationship.source_column), relationship])
-    );
-
-    const columns = result.rows.map((col) => {
-      const fk = foreignKeyMap.get(col.column_name);
-      const enumValues =
-        Array.isArray(col.enum_values) && col.enum_values.length > 0
-          ? col.enum_values
-          : (liveEnumValueMap.get(String(col.column_name)) || []);
-      return {
-        ...col,
-        enum_values: enumValues,
-        foreign_table: fk ? fk.target_table : null,
-        foreign_column: fk ? fk.target_column : null,
-        relation_type: fk ? fk.relation_type : null
-      };
-    });
-
-    res.json({
+    return res.json({ 
       success: true,
-      columns,
-      relationships
+      columns: result.rows,
+      liveEnumValues: liveEnumValueMap.size > 0 ? Object.fromEntries(liveEnumValueMap) : null
     });
   } catch (error) {
     console.error('Get columns error:', error);
@@ -240,7 +212,7 @@ const schemaController = {
       details: error.message 
     });
   }
-  },
+},
 
   async createTableMapping(req, res) {
     try {
@@ -297,12 +269,12 @@ const schemaController = {
 
       const organizationId = req.user.organization_id;
 
-      // Verify table belongs to organization
       const tableCheck = await db.query(
         `SELECT st.id 
          FROM semantic_tables st
-         JOIN database_connections dc ON st.connection_id = dc.id
-         WHERE st.id = $1 AND dc.organization_id = $2`,
+         LEFT JOIN database_connections dc ON st.connection_id = dc.id
+         LEFT JOIN file_sources fs ON st.file_source_id = fs.id
+         WHERE st.id = $1 AND (dc.organization_id = $2 OR fs.organization_id = $2)`,
         [semantic_table_id, organizationId]
       );
 
@@ -340,8 +312,8 @@ const schemaController = {
     } catch (error) {
       console.error('Create column mapping error:', error);
       res.status(500).json({ error: 'Failed to create column mapping' });
-    }
-  },
+      }
+    },
 
   async getMappedTables(req, res) {
     try {
@@ -363,8 +335,8 @@ const schemaController = {
     } catch (error) {
       console.error('Get mapped tables error:', error);
       res.status(500).json({ error: 'Failed to fetch mapped tables' });
-    }
-  },
+        }
+      },
 
   async deleteConnection(req, res) {
   try {
@@ -397,306 +369,33 @@ const schemaController = {
   }
 },
 
-// async discoverAndSeedSchema(req, res) {
-//   try {
-//     const { connectionId } = req.params;
-//     const organizationId = req.user.organization_id;
-//     const { 
-//       seed_tables = true, 
-//       seed_columns = true,
-//       override_existing = false 
-//     } = req.body;
-
-//     console.log(`Starting schema discovery for connection: ${connectionId}`);
-//     await ensureSchemaMetadataStorage(db);
-
-//     // Get database connection details
-//     const connectionResult = await db.query(
-//       `SELECT * FROM database_connections 
-//        WHERE id = $1 AND organization_id = $2`,
-//       [connectionId, organizationId]
-//     );
-
-//     if (!connectionResult.rows[0]) {
-//       return res.status(404).json({ error: 'Database connection not found' });
-//     }
-
-//     const dbConfig = connectionResult.rows[0];
-
-//     // Connect to the external database (RDS)
-//     const pool = await dbDiscoverer.getConnectionPool(dbConfig);
-
-//     // Discover all tables from external database
-//     const tables = await dbDiscoverer.discoverTables(pool, dbConfig.db_type);
-
-//     console.log(`Discovered ${tables.length} tables`);
-
-//     let seededTables = [];
-//     let seededColumns = [];
-//     let errors = [];
-
-//     // First, let's clear existing data if override is true
-//     if (override_existing) {
-//       try {
-//         await db.query(
-//           `DELETE FROM semantic_relationships WHERE connection_id = $1`,
-//           [connectionId]
-//         );
-
-//         await db.query(
-//           `DELETE FROM semantic_columns WHERE semantic_table_id IN (
-//             SELECT id FROM semantic_tables WHERE connection_id = $1
-//           )`,
-//           [connectionId]
-//         );
-
-//         await db.query(
-//           `DELETE FROM semantic_tables WHERE connection_id = $1`,
-//           [connectionId]
-//         );
-
-//         console.log(`Cleared existing data for connection: ${connectionId}`);
-//       } catch (clearError) {
-//         console.error('Error clearing existing data:', clearError.message);
-//       }
-//     }
-
-//     // Seed tables into YOUR semantic_tables table
-//     if (seed_tables) {
-//       for (const table of tables) {
-//         try {
-//           // Ensure table_name is a string
-//           const tableName = String(table.table_name || '').trim();
-
-//           console.log(`Processing table: "${tableName}"`);
-
-//           let result;
-
-//           // Use explicit type casting in the query
-//           if (override_existing) {
-//             // Use DO NOTHING on conflict since we already cleared data
-//             result = await db.query(
-//               `INSERT INTO semantic_tables (
-//                 connection_id, table_name, business_name, is_enabled
-//               )
-//               VALUES ($1::uuid, $2::varchar(255), $3::varchar(255), true)
-//               ON CONFLICT (connection_id, table_name) 
-//               DO NOTHING
-//               RETURNING *`,
-//               [
-//                 connectionId,
-//                 tableName,
-//                 tableName // business_name same as table_name initially
-//               ]
-//             );
-//           } else {
-//             // Insert only if not exists
-//             result = await db.query(
-//               `INSERT INTO semantic_tables (
-//                 connection_id, table_name, business_name, is_enabled
-//               )
-//               SELECT $1::uuid, $2::varchar(255), $3::varchar(255), true
-//               WHERE NOT EXISTS (
-//                 SELECT 1 FROM semantic_tables 
-//                 WHERE connection_id = $1::uuid AND table_name = $2::varchar(255)
-//               )
-//               RETURNING *`,
-//               [
-//                 connectionId,
-//                 tableName,
-//                 tableName
-//               ]
-//             );
-//           }
-
-//           const tableRecord =
-//             result.rows[0] ||
-//             (
-//               await db.query(
-//                 `SELECT *
-//                  FROM semantic_tables
-//                  WHERE connection_id = $1::uuid AND table_name = $2::varchar(255)
-//                  LIMIT 1`,
-//                 [connectionId, tableName]
-//               )
-//             ).rows[0];
-
-//           if (!tableRecord) {
-//             console.log(`Table ${tableName} already exists or not inserted`);
-//             continue;
-//           }
-
-//           if (result.rows[0]) {
-//             seededTables.push(tableRecord);
-//           }
-
-//           if (seed_columns) {
-//             const tableId = tableRecord.id;
-//             const columns = await dbDiscoverer.discoverColumns(
-//               pool,
-//               dbConfig.db_type,
-//               tableName
-//             );
-//             const columnMetadata = await dbDiscoverer.discoverColumnMetadata(
-//               pool,
-//               dbConfig.db_type,
-//               tableName
-//             );
-//             const columnMetadataMap = new Map(
-//               columnMetadata.map((column) => [String(column.column_name), column])
-//             );
-
-//             console.log(`Discovered ${columns.length} columns for table: ${tableName}`);
-
-//             for (const column of columns) {
-//               try {
-//                 const columnName = String(column.column_name || '').trim();
-//                 const metadata = columnMetadataMap.get(columnName);
-//                 const dataType = String(metadata?.data_type || column.data_type || '').trim();
-//                 const isNullable = column.is_nullable === 'YES';
-//                 const defaultValue =
-//                   column.default_value !== null && column.default_value !== undefined
-//                     ? String(column.default_value)
-//                     : null;
-//                 const enumValues = Array.isArray(metadata?.enum_values)
-//                   ? metadata.enum_values.filter((value) => value != null)
-//                   : [];
-
-//                 const columnResult = await db.query(
-//                   `INSERT INTO semantic_columns (
-//                     semantic_table_id, column_name, business_name,
-//                     data_type, is_nullable, default_value, enum_values, is_enabled
-//                   )
-//                   VALUES (
-//                     $1::uuid, $2::varchar(255), $3::varchar(255),
-//                     $4::varchar(100), $5::boolean, $6::text, $7::jsonb, true
-//                   )
-//                   ON CONFLICT (semantic_table_id, column_name)
-//                   DO UPDATE SET
-//                     data_type = EXCLUDED.data_type,
-//                     is_nullable = EXCLUDED.is_nullable,
-//                     default_value = EXCLUDED.default_value,
-//                     enum_values = EXCLUDED.enum_values,
-//                     updated_at = CURRENT_TIMESTAMP
-//                   RETURNING *`,
-//                   [
-//                     tableId,
-//                     columnName,
-//                     columnName,
-//                     dataType,
-//                     isNullable,
-//                     defaultValue,
-//                     JSON.stringify(enumValues)
-//                   ]
-//                 );
-
-//                 if (columnResult.rows[0] && result.rows[0]) {
-//                   seededColumns.push(columnResult.rows[0]);
-//                 }
-//               } catch (columnError) {
-//                 const errorMsg = `Error seeding column ${column.column_name}: ${columnError.message}`;
-//                 console.error(errorMsg);
-//                 errors.push(errorMsg);
-//               }
-//             }
-
-//             try {
-//               const foreignKeys = await dbDiscoverer.discoverForeignKeys(
-//                 pool,
-//                 dbConfig.db_type,
-//                 tableName
-//               );
-
-//               for (const foreignKey of foreignKeys) {
-//                 await db.query(
-//                   `INSERT INTO semantic_relationships (
-//                     connection_id, source_table, source_column, target_table, target_column, relation_type
-//                   )
-//                   VALUES ($1::uuid, $2::varchar(255), $3::varchar(255), $4::varchar(255), $5::varchar(255), $6::varchar(50))
-//                   ON CONFLICT (connection_id, source_table, source_column, target_table, target_column, relation_type)
-//                   DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
-//                   [
-//                     connectionId,
-//                     tableName,
-//                     String(foreignKey.column_name || '').trim(),
-//                     String(foreignKey.foreign_table || '').trim(),
-//                     String(foreignKey.foreign_column || '').trim(),
-//                     'foreign_key'
-//                   ]
-//                 );
-//               }
-//             } catch (relationshipError) {
-//               const errorMsg = `Error seeding relationships for ${tableName}: ${relationshipError.message}`;
-//               console.error(errorMsg);
-//               errors.push(errorMsg);
-//             }
-//           }
-//         } catch (tableError) {
-//           const errorMsg = `Error seeding table ${table.table_name}: ${tableError.message}`;
-//           console.error(errorMsg);
-//           errors.push(errorMsg);
-//           // Continue with other tables
-//         }
-//       }
-//     }
-
-//     // Release the connection pool to external database
-//     await pool.end();
-
-//     const relationshipCountResult = await db.query(
-//       `SELECT COUNT(*)::int AS count
-//        FROM semantic_relationships
-//        WHERE connection_id = $1`,
-//       [connectionId]
-//     );
-
-//     res.status(200).json({
-//       success: true,
-//       message: 'Schema discovery and seeding completed',
-//       summary: {
-//         total_tables_discovered: tables.length,
-//         tables_seeded: seededTables.length,
-//         columns_seeded: seededColumns.length,
-//         relationships_seeded: relationshipCountResult.rows[0]?.count || 0,
-//         connection: {
-//           id: dbConfig.id,
-//           database_name: dbConfig.database_name,
-//           db_type: dbConfig.db_type,
-//           host: dbConfig.host
-//         }
-//       },
-//       errors: errors.length > 0 ? errors.slice(0, 10) : undefined, // Show only first 10 errors
-//       tables: seededTables,
-//       columns: seededColumns
-//     });
-
-//   } catch (error) {
-//     console.error('Discover and seed schema error:', error);
-//     res.status(500).json({ 
-//       error: 'Failed to discover and seed schema',
-//       details: error.message,
-//       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-//     });
-//   }
-// },
-
-
-// In schemaController.js - discoverAndSeedSchema method
 
 async discoverAndSeedSchema(req, res) {
   try {
     const { connectionId } = req.params;
     const organizationId = req.user.organization_id;
+
+    // 1. Check if this is actually a file source
+    const fileSourceCheck = await db.query(
+      'SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2',
+      [connectionId, organizationId]
+    );
+
+    if (fileSourceCheck.rows.length > 0) {
+      console.log('🔄 Redirecting to file discovery for:', connectionId);
+      return this.discoverFileSchema(req, res);
+    }
+
     const { 
       seed_tables = true, 
       seed_columns = true,
-      override_existing = true  // Change default to true
+      override_existing = true 
     } = req.body;
 
     console.log(`Starting schema discovery for connection: ${connectionId}`);
     await ensureSchemaMetadataStorage(db);
 
-    // Get database connection details
+    // 2. Standard SQL Discovery
     const connectionResult = await db.query(
       `SELECT * FROM database_connections 
        WHERE id = $1 AND organization_id = $2`,
@@ -1060,8 +759,9 @@ async bulkUpdateColumnMappings(req, res) {
     const tableCheck = await db.query(
       `SELECT st.id 
        FROM semantic_tables st
-       JOIN database_connections dc ON st.connection_id = dc.id
-       WHERE st.id = $1 AND dc.organization_id = $2`,
+       LEFT JOIN database_connections dc ON st.connection_id = dc.id
+       LEFT JOIN file_sources fs ON st.file_source_id = fs.id
+       WHERE st.id = $1 AND (dc.organization_id = $2 OR fs.organization_id = $2)`,
       [semantic_table_id, organizationId]
     );
 
@@ -1160,11 +860,12 @@ async bulkUpdateColumnMappings(req, res) {
 
       let query = `
         SELECT sc.*, st.table_name, st.business_name as table_business_name,
-               dc.database_name, dc.db_type
+               dc.database_name, dc.db_type, fs.filename as file_source_name
         FROM semantic_columns sc
         JOIN semantic_tables st ON sc.semantic_table_id = st.id
-        JOIN database_connections dc ON st.connection_id = dc.id
-        WHERE dc.organization_id = $1
+        LEFT JOIN database_connections dc ON st.connection_id = dc.id
+        LEFT JOIN file_sources fs ON st.file_source_id = fs.id
+        WHERE (dc.organization_id = $1 OR fs.organization_id = $1)
       `;
       const params = [organizationId];
 
@@ -1184,6 +885,101 @@ async bulkUpdateColumnMappings(req, res) {
     } catch (error) {
       console.error('Get mapped columns error:', error);
       res.status(500).json({ error: 'Failed to fetch mapped columns' });
+    }
+  },
+
+  async discoverFileSchema(req, res) {
+    const isInternal = !res || typeof res.json !== 'function';
+    try {
+      const fileSourceId = req.params?.fileSourceId || req.fileSourceId;
+      const organizationId = req.user?.organization_id || req.organizationId;
+      
+      if (!fileSourceId || !organizationId) {
+        if (isInternal) throw new Error('Missing fileSourceId or organizationId');
+        return res.status(400).json({ error: 'Missing required IDs' });
+      }
+
+      const sourceResult = await db.query('SELECT * FROM file_sources WHERE id = $1 AND organization_id = $2', [fileSourceId, organizationId]);
+      if (sourceResult.rows.length === 0) {
+        if (isInternal) throw new Error('File source not found');
+        return res.status(404).json({ error: 'File source not found' });
+      }
+
+      const source = sourceResult.rows[0];
+      if (!source.s3_key) {
+        if (isInternal) throw new Error('Source has no file associated');
+        return res.status(400).json({ error: 'Source has no file associated' });
+      }
+
+      const schema = await fileDiscoverer.discoverSchema(source.s3_key);
+      
+      // Clean wipe: Delete existing schema metadata for this file source
+      await db.query('DELETE FROM semantic_relationships WHERE file_source_id = $1', [fileSourceId]);
+      await db.query('DELETE FROM semantic_columns WHERE semantic_table_id IN (SELECT id FROM semantic_tables WHERE file_source_id = $1)', [fileSourceId]);
+      await db.query('DELETE FROM semantic_tables WHERE file_source_id = $1', [fileSourceId]);
+
+      const seededTables = [];
+      let totalColumns = 0;
+      
+      const filenameBase = source.filename
+        ? source.filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase()
+        : "file_data";
+
+      const sheetEntries = Object.entries(schema);
+      
+      for (const [sheetName, columns] of sheetEntries) {
+        totalColumns += columns.length;
+        
+        // Always use filename as base for better uniqueness across the organization
+        const isGenericSheet = ["Sheet1", "CSV", "Worksheet", "Sheet 1", "Sheet"].includes(sheetName);
+        
+        let tableName = filenameBase;
+        
+        // If there are multiple sheets, always include the sheet name to avoid collisions
+        // If there's only one sheet but it has a meaningful name (not "Sheet1"), also include it
+        if (sheetEntries.length > 1 || !isGenericSheet) {
+          const sanitizedSheetName = sheetName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+          
+          // If it's a generic name and we have other sheets, still append it to be explicit
+          tableName = `${filenameBase}_${sanitizedSheetName}`;
+        }
+
+        const businessName = sheetEntries.length > 1 || !isGenericSheet
+          ? `${source.filename.replace(/\.[^/.]+$/, "")} (${sheetName})`
+          : source.filename.replace(/\.[^/.]+$/, "");
+
+        const tableResult = await db.query(
+          `INSERT INTO semantic_tables (file_source_id, table_name, business_name, is_enabled) 
+           VALUES ($1, $2, $3, true) RETURNING *`, 
+          [fileSourceId, tableName, businessName]
+        );
+        const table = tableResult.rows[0];
+        seededTables.push(table);
+        for (const colName of columns) {
+          await db.query(
+            `INSERT INTO semantic_columns (semantic_table_id, column_name, business_name, data_type, is_enabled) 
+             VALUES ($1, $2, $3, 'text', true)`, 
+            [table.id, colName, colName]
+          );
+        }
+      }
+
+      const resultData = { 
+        success: true, 
+        message: 'File schema discovered successfully', 
+        summary: {
+          tables_discovered: seededTables.length,
+          columns_discovered: totalColumns
+        },
+        tables: seededTables 
+      };
+
+      if (isInternal) return resultData;
+      res.json(resultData);
+    } catch (error) {
+      console.error('[SCHEMA] File discovery error:', error);
+      if (isInternal) throw error;
+      res.status(500).json({ error: 'Failed to discover file schema', details: error.message });
     }
   }
 };
