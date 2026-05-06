@@ -1,5 +1,10 @@
 const DatabaseConnection = require('../models/DatabaseConnection');
+const FileSource = require('../models/FileSource');
+const Organization = require('../models/Organization');
+const { s3, bucketName } = require('../config/s3');
 const { testConnection, getSchema } = require('../utils/dbConnection');
+const schemaController = require('./schemaController');
+
 
 const databaseController = {
   async connect(req, res) {
@@ -84,7 +89,6 @@ const databaseController = {
 
 async getConnections(req, res) {
   try {
-    // 🔴 ADD THIS
     res.set({
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
       'Pragma': 'no-cache',
@@ -122,145 +126,6 @@ async getConnections(req, res) {
   }
 }
 ,
-
-//   async updateConnection(req, res) {
-//   try {
-//     const { id } = req.params;
-//     const updates = req.body;
-//     const organizationId = req.user.organization_id;
-
-//     const connection = await DatabaseConnection.findById(id);
-//     if (!connection || connection.organization_id !== organizationId) {
-//       return res.status(404).json({
-//         success: false,
-//         error: 'Connection not found'
-//       });
-//     }
-
-//     // ---------- NORMALIZE + COMPARE (NO PASSWORD) ----------
-//     const normalize = (v) =>
-//       typeof v === 'string' ? v.trim() : v;
-
-//     const incoming = {
-//       db_type: normalize(updates.db_type ?? connection.db_type),
-//       host: normalize(updates.host ?? connection.host),
-//       port: Number(updates.port ?? connection.port),
-//       database_name: normalize(updates.database_name ?? connection.database_name),
-//       username: normalize(updates.username ?? connection.username),
-//       ssl_enabled: updates.ssl_enabled ?? connection.ssl_enabled
-//     };
-
-//     const existing = {
-//       db_type: normalize(connection.db_type),
-//       host: normalize(connection.host),
-//       port: Number(connection.port),
-//       database_name: normalize(connection.database_name),
-//       username: normalize(connection.username),
-//       ssl_enabled: connection.ssl_enabled
-//     };
-
-//     const isSameConfig =
-//       incoming.db_type === existing.db_type &&
-//       incoming.host === existing.host &&
-//       incoming.port === existing.port &&
-//       incoming.database_name === existing.database_name &&
-//       incoming.username === existing.username &&
-//       incoming.ssl_enabled === existing.ssl_enabled;
-
-//     // ---------- CASE 1: SAME CONFIG, NO PASSWORD ----------
-//     if (isSameConfig && !updates.password) {
-//       return res.json({
-//         success: true,
-//         no_change: true,
-//         message: 'No changes detected.'
-//       });
-//     }
-
-//     // ---------- CASE 2: SAME CONFIG, PASSWORD ONLY ----------
-//     if (isSameConfig && updates.password) {
-//       const testResult = await testConnection({
-//         ...incoming,
-//         password: updates.password
-//       });
-
-//       if (!testResult.success) {
-//         return res.status(400).json({
-//           success: false,
-//           error: 'Connection test failed',
-//           details: testResult.error
-//         });
-//       }
-
-//       return res.json({
-//         success: true,
-//         no_change: true,
-//         message: 'Credentials verified. No configuration changes.'
-//       });
-//     }
-
-//     // ---------- CASE 3: CONFIG CHANGED ----------
-//     const testResult = await testConnection({
-//       ...incoming,
-//       password: updates.password || connection.password
-//     });
-
-//     if (!testResult.success) {
-//       return res.status(400).json({
-//         success: false,
-//         error: 'Connection test failed',
-//         details: testResult.error
-//       });
-//     }
-
-//     // const updatedConnection = await DatabaseConnection.update(id, {
-//     //   ...incoming,
-//     //   ...(updates.password && { password: updates.password }),
-//     //   latency_ms: testResult.latency_ms,
-//     //   status: 'connected'
-//     // });
-
-//     // const { password, ...safeConnection } = updatedConnection;
-
-//     // res.json({
-//     //   success: true,
-//     //   updated: true,
-//     //   connection: safeConnection
-//     // });
-
-
-//     // Update the connection record
-// const updatedConnection = await DatabaseConnection.update(id, {
-//   ...incoming,
-//   ...(updates.password && { password: updates.password }),
-//   latency_ms: testResult.latency_ms,
-//   status: 'connected'
-// });
-
-// // 🔁 Auto re-seed schema ONLY when config actually changed
-// await schemaController.discoverAndSeedSchema({
-//   params: { connectionId: id },
-//   body: { override_existing: true, seed_tables: true, seed_columns: true },
-//   user: req.user,
-//   query: {}
-// });
-
-// const { password, ...safeConnection } = updatedConnection;
-// res.json({
-//   success: true,
-//   updated: true,
-//   connection: safeConnection,
-//   schema_resynced: true // optional signal to frontend
-// });
-
-//   } catch (error) {
-//     console.error('Update connection error:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: 'Failed to update connection'
-//     });
-//   }
-// }
-// In databaseController.js - updateConnection method
 
 async updateConnection(req, res) {
   try {
@@ -477,6 +342,253 @@ async updateConnection(req, res) {
       error: 'Connection test failed' 
     });
   }
-}};
+},
+
+  async getFileSources(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const sources = await FileSource.findByOrganization(organizationId);
+      res.json({ success: true, sources });
+    } catch (error) {
+      console.error('Get file sources error:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch file sources' });
+    }
+  },
+
+  async uploadFile(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const { type, source_url } = req.body;
+      
+      const files = req.files || (req.file ? [req.file] : []);
+      const createdSources = [];
+
+      if (files.length === 0 && !source_url) {
+        return res.status(400).json({ success: false, error: 'No files or URL provided' });
+      }
+
+      // Handle File Uploads
+      if (files.length > 0) {
+        for (const file of files) {
+          const safeFileName = file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+          const s3Key = `${organizationId}/${safeFileName}`;
+
+          const uploadResult = await s3.upload({
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: file.buffer,
+            ContentType: file.mimetype
+          }).promise();
+
+          const source = await FileSource.create({
+            organization_id: organizationId,
+            source_type: type || 'excel',
+            filename: file.originalname.toLowerCase(),
+            s3_key: s3Key,
+            url: uploadResult.Location,
+            status: 'active'
+          });
+
+          // 🔁 AUTOMATION: Discover Schema
+          try {
+            await schemaController.discoverFileSchema({
+              fileSourceId: source.id,
+              organizationId: organizationId
+            });
+          } catch (autoErr) {
+            console.error(`[UPLOAD] Automation failed for ${file.originalname}:`, autoErr.message);
+          }
+
+          createdSources.push(source);
+        }
+
+        // Activate the last uploaded source in the organization preference
+        if (createdSources.length > 0) {
+          const lastSource = createdSources[createdSources.length - 1];
+          const db = require('../config/database');
+          await db.query(
+            'UPDATE organizations SET active_source_id = $1, active_source_type = $2 WHERE id = $3',
+            [lastSource.id, lastSource.source_type, organizationId]
+          );
+        }
+
+        return res.json({ success: true, sources: createdSources });
+      }
+
+      // Handle URL-only upload (e.g. Google Sheets link)
+      if (source_url) {
+        const source = await FileSource.create({
+          organization_id: organizationId,
+          source_type: type || 'google_sheets',
+          filename: 'Google Sheet',
+          url: source_url,
+          status: 'active'
+        });
+        
+        return res.json({ success: true, source });
+      }
+
+    } catch (error) {
+      console.error('Upload file source error:', error);
+      res.status(500).json({ success: false, error: 'Failed to upload file source' });
+    }
+  },
+
+  async updateFileSource(req, res) {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organization_id;
+      const { source_url, name } = req.body;
+      const source = await FileSource.findById(id);
+
+      if (!source || source.organization_id !== organizationId) {
+        return res.status(404).json({ success: false, error: 'Source not found' });
+      }
+
+      const updates = {};
+      if (name) updates.filename = name;
+
+      if (req.file) {
+        // Replace file in S3
+        const safeFileName = req.file.originalname.replace(/[^a-z0-9.]/gi, '_').toLowerCase();
+        const s3Key = `${organizationId}/${safeFileName}`;
+
+        // Delete old file from S3
+        if (source.s3_key) {
+          try {
+            await s3.deleteObject({ Bucket: bucketName, Key: source.s3_key }).promise();
+          } catch (e) {
+            console.warn('Failed to delete old S3 object:', e);
+          }
+        }
+
+        // Upload new file
+        const uploadResult = await s3.upload({
+          Bucket: bucketName,
+          Key: s3Key,
+          Body: req.file.buffer,
+          ContentType: req.file.mimetype
+        }).promise();
+
+        updates.filename = req.file.originalname.toLowerCase();
+        updates.s3_key = s3Key;
+        updates.url = uploadResult.Location;
+      } else if (source_url && source.source_type === 'google_sheets') {
+        updates.url = source_url;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        const updatedSource = await FileSource.update(id, updates);
+
+        // 🔁 AUTOMATION: Re-discover Schema if file was replaced
+        if (req.file) {
+          try {
+            console.log(`[UPDATE] Automating re-discovery for source: ${id}`);
+            await schemaController.discoverFileSchema({
+              fileSourceId: id,
+              organizationId: organizationId
+            });
+          } catch (autoErr) {
+            console.error('[UPDATE] Re-discovery failed:', autoErr.message);
+          }
+        }
+
+        return res.json({ success: true, source: updatedSource });
+      }
+
+      res.json({ success: true, message: 'No changes detected' });
+    } catch (error) {
+      console.error('Update file source error:', error);
+      res.status(500).json({ success: false, error: 'Failed to update file source' });
+    }
+  },
+
+  async deleteFileSource(req, res) {
+    try {
+      const { id } = req.params;
+      const organizationId = req.user.organization_id;
+      const source = await FileSource.findById(id);
+
+      if (!source || source.organization_id !== organizationId) {
+        return res.status(404).json({ success: false, error: 'Source not found' });
+      }
+
+      // 1. Delete associated semantic schema metadata
+      const db = require('../config/database');
+      await db.query('DELETE FROM semantic_relationships WHERE file_source_id = $1', [id]);
+      await db.query('DELETE FROM semantic_columns WHERE semantic_table_id IN (SELECT id FROM semantic_tables WHERE file_source_id = $1)', [id]);
+      await db.query('DELETE FROM semantic_tables WHERE file_source_id = $1', [id]);
+
+      // 2. Delete from S3 (Attempt to delete from current bucket, or fallback to old bucket if needed)
+      if (source.s3_key) {
+        try {
+          // Try current configured bucket first
+          await s3.deleteObject({ Bucket: bucketName, Key: source.s3_key }).promise();
+          console.log(`[DELETE] Successfully deleted file from S3: ${source.s3_key} (Bucket: ${bucketName})`);
+        } catch (s3Error) {
+          // If it fails, try the old bucket name just in case it was stored there
+          const oldBucket = 'invertiotaxdocs';
+          if (bucketName !== oldBucket) {
+            try {
+              await s3.deleteObject({ Bucket: oldBucket, Key: source.s3_key }).promise();
+              console.log(`[DELETE] Successfully deleted file from old S3 bucket: ${source.s3_key} (Bucket: ${oldBucket})`);
+            } catch (oldS3Error) {
+              console.warn(`[DELETE] Failed to delete file from both S3 buckets. Proceeding with DB cleanup.`, {
+                key: source.s3_key,
+                currentBucket: bucketName,
+                oldBucket: oldBucket,
+                error: oldS3Error.message
+              });
+            }
+          } else {
+            console.warn(`[DELETE] Failed to delete file from S3 bucket: ${bucketName}. Proceeding with DB cleanup.`, s3Error.message);
+          }
+        }
+      }
+
+      // 3. Delete file source record
+      await FileSource.delete(id, organizationId);
+      
+      res.json({ success: true, message: 'Source and associated schema deleted successfully' });
+    } catch (error) {
+      console.error('Delete file source error:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete file source' });
+    }
+  },
+  async updateActiveSource(req, res) {
+    try {
+      const { source_id, source_type } = req.body;
+      const organizationId = req.user.organization_id;
+      
+      const db = require('../config/database');
+      await db.query(
+        'UPDATE organizations SET active_source_id = $1, active_source_type = $2 WHERE id = $3',
+        [source_id, source_type, organizationId]
+      );
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Update active source error:', error);
+      res.status(500).json({ success: false, error: 'Failed to update active source' });
+    }
+  },
+
+  async getActiveSource(req, res) {
+    try {
+      const organizationId = req.user.organization_id;
+      const db = require('../config/database');
+      
+      const result = await db.query(
+        'SELECT active_source_id, active_source_type FROM organizations WHERE id = $1',
+        [organizationId]
+      );
+      
+      res.json({ success: true, active_source: result.rows[0] });
+    } catch (error) {
+      console.error('Get active source error:', error);
+      res.status(500).json({ success: false, error: 'Failed to get active source' });
+    }
+  }
+};
 
 module.exports = databaseController;

@@ -31,6 +31,12 @@ router.post('/:connectionId/discover-seed',
   authorize([ROLES.ADMIN]),
   schemaController.discoverAndSeedSchema
 );
+
+// Discover schema for file sources (Admin only)
+router.post('/file-source/:fileSourceId/discover',
+  authorize([ROLES.ADMIN]),
+  schemaController.discoverFileSchema
+);
 // In your schema routes
 router.delete('/:connectionId',
   authorize([ROLES.ADMIN]),

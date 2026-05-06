@@ -9,20 +9,57 @@ const chatController = {
 
       console.log('🆕 Creating conversation:', { title, connection_id, user_id, organization_id });
 
+      // 🆕 Handle virtual multi-file source (Special case for Excel aggregate mode)
+      if (connection_id === 'multi-file-source') {
+        const fileCheck = await db.query(
+          "SELECT COUNT(*) FROM file_sources WHERE organization_id = $1 AND status = 'active'",
+          [organization_id]
+        );
+
+        if (parseInt(fileCheck.rows[0].count) === 0) {
+          return res.status(400).json({
+            error: 'No active file sources found. Please upload and activate files before starting chat.',
+            code: 'no_active_files'
+          });
+        }
+
+        const result = await db.query(
+          `INSERT INTO chat_conversations (organization_id, user_id, connection_id, file_source_id, title)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING *`,
+          [organization_id, user_id, null, null, title || 'New Chat']
+        );
+
+        console.log('✅ Multi-file conversation created:', result.rows[0].id);
+        return res.status(201).json({
+          success: true,
+          conversation: result.rows[0]
+        });
+      }
+
       // Require an active database connection before starting chat
-      const connectionResult = connection_id
+      let connectionResult = connection_id
         ? await db.query(
-          `SELECT id FROM database_connections
-           WHERE organization_id = $1 AND id = $2 AND status = 'connected'
-           LIMIT 1`,
+          `SELECT id FROM database_connections WHERE organization_id = $1 AND id = $2 AND status = 'connected' LIMIT 1`,
           [organization_id, connection_id]
         )
         : await db.query(
-          `SELECT id FROM database_connections
-           WHERE organization_id = $1 AND status = 'connected'
-           LIMIT 1`,
+          `SELECT id FROM database_connections WHERE organization_id = $1 AND status = 'connected' LIMIT 1`,
           [organization_id]
         );
+
+      if (!connectionResult.rows.length) {
+          // Check file sources if no DB connection found
+          connectionResult = (connection_id && connection_id !== 'multi-file-source')
+            ? await db.query(
+              `SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2 AND status = 'active' LIMIT 1`,
+              [connection_id, organization_id]
+            )
+            : await db.query(
+              `SELECT id FROM file_sources WHERE organization_id = $1 AND status = 'active' LIMIT 1`,
+              [organization_id]
+            );
+      }
 
       if (!connectionResult.rows.length) {
         return res.status(400).json({
@@ -31,11 +68,27 @@ const chatController = {
         });
       }
 
+      // Check if connection_id belongs to a file source
+      const fileSourceCheck = (connection_id && connection_id !== 'multi-file-source') 
+        ? await db.query(
+            "SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2 LIMIT 1",
+            [connection_id, organization_id]
+          )
+        : { rows: [] };
+
+      const isFileSource = fileSourceCheck.rows.length > 0;
+
       const result = await db.query(
-        `INSERT INTO chat_conversations (organization_id, user_id, connection_id, title)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO chat_conversations (organization_id, user_id, connection_id, file_source_id, title)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING *`,
-        [organization_id, user_id, connection_id || null, title || 'New Chat']
+        [
+          organization_id, 
+          user_id, 
+          isFileSource ? null : (connection_id || null),
+          isFileSource ? connection_id : null,
+          title || 'New Chat'
+        ]
       );
 
       console.log('✅ Conversation created:', result.rows[0].id);
