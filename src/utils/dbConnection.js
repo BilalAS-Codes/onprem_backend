@@ -1,5 +1,6 @@
 const { Client } = require('pg');
 const mysql = require('mysql2/promise');
+const oracledb = require('oracledb');
 const db = require('../config/database');
 const dbDiscoverer = require('../helpers/dbDiscoverer');
 const { ensureSchemaMetadataStorage } = require('../helpers/semanticMetadata');
@@ -39,6 +40,18 @@ const testConnection = async (config) => {
 
       await connection.query('SELECT 1');
       await connection.end();
+
+      const latency_ms = Date.now() - startTime;
+      return { success: true, latency_ms };
+    } else if (config.db_type === 'oracle') {
+      const connection = await oracledb.getConnection({
+        user: config.username,
+        password: config.password,
+        connectString: `${config.host}:${config.port}/${config.database_name}`
+      });
+
+      await connection.execute('SELECT 1 FROM dual');
+      await connection.close();
 
       const latency_ms = Date.now() - startTime;
       return { success: true, latency_ms };
@@ -169,6 +182,38 @@ const getSchema = async (connectionId, config) => {
       }
 
       await connection.end();
+    } else if (config.db_type === 'oracle') {
+      const connection = await oracledb.getConnection({
+        user: config.username,
+        password: config.password,
+        connectString: `${config.host}:${config.port}/${config.database_name}`
+      });
+
+      const tablesResult = await connection.execute(`
+        SELECT table_name AS "table_name", 'TABLE' AS "table_type"
+        FROM all_tables
+        WHERE owner = USER
+        ORDER BY table_name
+      `, [], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+
+      tables = tablesResult.rows;
+
+      for (const table of tables) {
+        const columnsResult = await connection.execute(`
+          SELECT 
+            column_name AS "column_name",
+            data_type AS "data_type",
+            CASE WHEN nullable = 'Y' THEN 'YES' ELSE 'NO' END AS "is_nullable",
+            data_default AS "column_default"
+          FROM all_tab_columns
+          WHERE table_name = :tbl AND owner = USER
+          ORDER BY column_id
+        `, [table.table_name], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+
+        columns.push({ table_name: table.table_name, columns: columnsResult.rows });
+      }
+
+      await connection.close();
     }
 
     metadataPool = await dbDiscoverer.getConnectionPool(config);

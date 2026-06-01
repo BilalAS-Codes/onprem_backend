@@ -561,9 +561,10 @@ async updateConnection(req, res) {
       const organizationId = req.user.organization_id;
       
       const db = require('../config/database');
+      const dbSourceId = (source_id === '' || source_id === 'null' || !source_id) ? null : source_id;
       await db.query(
         'UPDATE organizations SET active_source_id = $1, active_source_type = $2 WHERE id = $3',
-        [source_id, source_type, organizationId]
+        [dbSourceId, source_type, organizationId]
       );
       
       res.json({ success: true });

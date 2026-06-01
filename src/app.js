@@ -24,6 +24,11 @@ const roleRoutes = require('./routes/roles');
 const questionsRoutes = require('./routes/questions');
 const analysisRoutes = require('./routes/analysis');
 const chatRoutes = require('./routes/chats');
+const integrationRoutes = require('./routes/integrations');
+const publicChatRoutes = require('./routes/publicChat');
+const developerApiRoutes = require('./routes/developerApi');
+const whatsappRoutes = require('./routes/whatsapp');
+
 const { startRaiseInvoicesJob } = require('./jobs/raiseInvoices');
 const { startQuotaExpiryJob } = require('./jobs/expiryQuotas');
 
@@ -31,13 +36,18 @@ const { startQuotaExpiryJob } = require('./jobs/expiryQuotas');
 const app = express();
 
 // Middleware
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginEmbedderPolicy: false
+}));
 app.use(cors({
   origin: "*",
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json({ limit: "5mb" }));
 app.use(morgan('combined'));
+app.use(express.static('public'));
+
 
 // Health check
 app.get('/health', (req, res) => {
@@ -46,7 +56,14 @@ app.get('/health', (req, res) => {
 // express.json configured above with size limit
 
 
-// API Routes
+// Public Chat Widget Route (Must be before protected routes)
+app.use('/api/public', publicChatRoutes);
+app.use('/api/public/whatsapp', whatsappRoutes);
+
+// Protected API Routes
+// Developer API (Uses API Key Auth)
+app.use('/api/v1', developerApiRoutes);
+
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/organizations', organizationRoutes);
@@ -59,10 +76,12 @@ app.use('/api/insights', insightRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/roles', roleRoutes);
-app.use('/api', userRoutes);
 app.use('/api/', questionsRoutes)
 app.use('/api/v1', analysisRoutes);
 app.use('/api/v1/chats', chatRoutes);
+app.use('/api/v1/integrations', integrationRoutes);
+
+
 
 // Swagger Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

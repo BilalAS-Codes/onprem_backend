@@ -30,12 +30,14 @@ const Department = {
          st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id) OR
          st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)
        )`;
+    const params = [organizationId];
        
     if (sourceType === 'excel') {
       joinCondition = `st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)`;
     } else if (sourceType && sourceType !== 'all') {
-      // For any database type (postgresql, mysql, snowflake, bigquery), filter by connection_id
-      joinCondition = `st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id)`;
+      // For any database type (postgresql, mysql, oracle, snowflake, bigquery), filter by connection_id and db_type
+      joinCondition = `st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id AND db_type = $2)`;
+      params.push(sourceType);
     }
 
     const result = await db.query(
@@ -80,7 +82,7 @@ const Department = {
        WHERE d.organization_id = $1
        GROUP BY d.id
        ORDER BY d.created_at DESC`,
-      [organizationId]
+      params
     );
     return result.rows;
   },

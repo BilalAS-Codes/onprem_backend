@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const mysql = require('mysql2/promise');
+const oracledb = require('oracledb');
 
 const normalizeEnumValues = (values) => {
   if (!Array.isArray(values)) {
@@ -38,33 +39,33 @@ const normalizeEnumValues = (values) => {
 
 const dbDiscoverer = {
   async getConnectionPool(connectionConfig) {
-  const {
-    db_type,
-    host,
-    port,
-    database_name,
-    username,
-    password,
-    ssl,
-    ssl_enabled
-  } = connectionConfig;
-  const useSsl = ssl_enabled ?? ssl ?? true;
-  
-  switch (db_type.toLowerCase()) {
-    case 'postgresql':
-    case 'postgres':
-      return new Pool({
-        host,
-        port: parseInt(port),
-        database: database_name,
-        user: username,
-        password,
-        ssl: useSsl ? {
-          rejectUnauthorized: false // For self-signed certificates
-        } : false,
-        max: 5,
-        idleTimeoutMillis: 30000
-      });
+    const {
+      db_type,
+      host,
+      port,
+      database_name,
+      username,
+      password,
+      ssl,
+      ssl_enabled
+    } = connectionConfig;
+    const useSsl = ssl_enabled ?? ssl ?? true;
+    
+    switch (db_type.toLowerCase()) {
+      case 'postgresql':
+      case 'postgres':
+        return new Pool({
+          host,
+          port: parseInt(port),
+          database: database_name,
+          user: username,
+          password,
+          ssl: useSsl ? {
+            rejectUnauthorized: false // For self-signed certificates
+          } : false,
+          max: 5,
+          idleTimeoutMillis: 30000
+        });
         
       case 'mysql':
         return mysql.createPool({
@@ -74,6 +75,15 @@ const dbDiscoverer = {
           user: username,
           password,
           connectionLimit: 5
+        });
+        
+      case 'oracle':
+        return oracledb.createPool({
+          user: username,
+          password,
+          connectString: `${host}:${port}/${database_name}`,
+          poolMax: 5,
+          poolMin: 1
         });
         
       default:
@@ -118,6 +128,22 @@ async discoverTables(pool, dbType) {
       }
       
       return rows;
+    } else if (dbType.toLowerCase() === 'oracle') {
+      const conn = await pool.getConnection();
+      try {
+        const result = await conn.execute(`
+          SELECT 
+            table_name AS "table_name",
+            owner AS "schema_name",
+            'TABLE' AS "table_type"
+          FROM all_tables
+          WHERE owner = USER
+          ORDER BY table_name
+        `, [], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        return result.rows;
+      } finally {
+        await conn.close();
+      }
     }
   } catch (error) {
     throw new Error(`Failed to discover tables: ${error.message}`);
@@ -152,6 +178,24 @@ async discoverTables(pool, dbType) {
           ORDER BY ordinal_position
         `, [tableName]);
         return rows;
+      } else if (dbType.toLowerCase() === 'oracle') {
+        const conn = await pool.getConnection();
+        try {
+          const result = await conn.execute(`
+            SELECT 
+              column_name AS "column_name",
+              data_type AS "data_type",
+              CASE WHEN nullable = 'Y' THEN 'YES' ELSE 'NO' END AS "is_nullable",
+              data_default AS "default_value",
+              column_id AS "ordinal_position"
+            FROM all_tab_columns
+            WHERE table_name = :tableName AND owner = USER
+            ORDER BY column_id
+          `, [tableName], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          return result.rows;
+        } finally {
+          await conn.close();
+        }
       }
     } catch (error) {
       throw new Error(`Failed to discover columns for table ${tableName}: ${error.message}`);
@@ -290,6 +334,25 @@ async discoverTables(pool, dbType) {
             enum_values: normalizeEnumValues(enumValues)
           };
         });
+      } else if (dbType.toLowerCase() === 'oracle') {
+        const conn = await pool.getConnection();
+        try {
+          const result = await conn.execute(`
+            SELECT 
+              column_name AS "column_name",
+              data_type AS "data_type"
+            FROM all_tab_columns
+            WHERE table_name = :tableName AND owner = USER
+            ORDER BY column_id
+          `, [tableName], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          return result.rows.map(row => ({
+            column_name: row.column_name,
+            data_type: row.data_type,
+            enum_values: []
+          }));
+        } finally {
+          await conn.close();
+        }
       }
 
       return [];
@@ -330,6 +393,24 @@ async discoverTables(pool, dbType) {
             AND REFERENCED_TABLE_NAME IS NOT NULL
         `, [tableName]);
         return rows;
+      } else if (dbType.toLowerCase() === 'oracle') {
+        const conn = await pool.getConnection();
+        try {
+          const result = await conn.execute(`
+            SELECT 
+              a.column_name AS "column_name", 
+              c_pk.table_name AS "foreign_table", 
+              b.column_name AS "foreign_column"
+            FROM all_cons_columns a
+            JOIN all_constraints bg ON a.constraint_name = bg.constraint_name AND a.owner = bg.owner
+            JOIN all_constraints c_pk ON bg.r_constraint_name = c_pk.constraint_name AND bg.r_owner = c_pk.owner
+            JOIN all_cons_columns b ON c_pk.constraint_name = b.constraint_name AND c_pk.owner = b.owner AND a.position = b.position
+            WHERE bg.constraint_type = 'R' AND bg.table_name = :tableName AND bg.owner = USER
+          `, [tableName], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          return result.rows;
+        } finally {
+          await conn.close();
+        }
       }
       return [];
     } catch (error) {
@@ -343,11 +424,17 @@ async discoverTables(pool, dbType) {
       
       if (connectionConfig.db_type.toLowerCase() === 'postgresql') {
         await pool.query('SELECT 1');
-      } else {
+        await pool.end();
+      } else if (connectionConfig.db_type.toLowerCase() === 'mysql') {
         const [rows] = await pool.query('SELECT 1');
+        await pool.end();
+      } else if (connectionConfig.db_type.toLowerCase() === 'oracle') {
+        const conn = await pool.getConnection();
+        await conn.execute('SELECT 1 FROM dual');
+        await conn.close();
+        await pool.close(0);
       }
       
-      await pool.end();
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message };
