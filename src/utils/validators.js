@@ -26,8 +26,8 @@ const validator = {
   validateDatabaseConnection(config) {
     const errors = [];
 
-    if (!config.db_type || !['postgresql', 'mysql'].includes(config.db_type.toLowerCase())) {
-      errors.push('Database type must be either postgresql or mysql');
+    if (!config.db_type || !['postgresql', 'mysql', 'oracle'].includes(config.db_type.toLowerCase())) {
+      errors.push('Database type must be postgresql, mysql, or oracle');
     }
 
     if (!config.host || config.host.trim().length === 0) {

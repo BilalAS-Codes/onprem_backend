@@ -24,16 +24,16 @@ function authenticateTokenForSSE(req, res, next) {
         console.log('Token found in query! Length:', req.query.token.length);
         console.log('Token preview:', req.query.token.substring(0, 50) + '...');
     }
-    
+
     // Try multiple ways to get the token
     let token = null;
-    
+
     // 1. Try query parameter first (Express should parse this automatically)
     if (req.query && req.query.token) {
         token = req.query.token;
         console.log('✅ Token found in req.query');
     }
-    
+
     // 2. Manual URL parsing as backup
     if (!token && req.url.includes('?')) {
         const urlParams = new URLSearchParams(req.url.split('?')[1]);
@@ -42,7 +42,7 @@ function authenticateTokenForSSE(req, res, next) {
             console.log('✅ Token found via manual URL parsing');
         }
     }
-    
+
     // 3. Try Authorization header
     if (!token && req.headers.authorization) {
         const parts = req.headers.authorization.split(' ');
@@ -57,7 +57,7 @@ function authenticateTokenForSSE(req, res, next) {
 
     // If still no token, return detailed error
     if (!token) {
-        return res.status(401).json({ 
+        return res.status(401).json({
             error: 'Authentication token required',
             hint: 'Please provide token as query parameter: ?token=YOUR_TOKEN',
             received: {
@@ -67,26 +67,26 @@ function authenticateTokenForSSE(req, res, next) {
             }
         });
     }
-    
+
     // Validate token is a JWT (should have 3 parts separated by dots)
     if (token.split('.').length !== 3) {
-        return res.status(400).json({ 
+        return res.status(400).json({
             error: 'Invalid token format',
             hint: 'Token should be a valid JWT',
             received: token.substring(0, 50) + '...'
         });
     }
-    
+
     // Verify JWT signature
     jwt.verify(token, jwtConfig.secret, (err, user) => {
         if (err) {
             console.error('❌ JWT verification failed:', err.message);
-            return res.status(403).json({ 
+            return res.status(403).json({
                 error: 'Invalid or expired token',
                 details: err.message
             });
         }
-        
+
         console.log('✅ JWT verified for user:', user.email);
         // Token is valid, attach user to request
         req.user = user;
@@ -160,10 +160,10 @@ async function getActiveSourceConfig(organizationId) {
     // Handle Excel as a multi-file source for the entire organization
     if (pref && pref.active_source_type === 'excel') {
         isFileSource = true;
-        conn = { 
-            id: 'multi-file-source', 
+        conn = {
+            id: 'multi-file-source',
             organization_id: organizationId,
-            source_type: 'excel' 
+            source_type: 'excel'
         };
         return { conn, isFileSource };
     }
@@ -193,10 +193,10 @@ async function getActiveSourceConfig(organizationId) {
             );
             if (fileResult.rows.length) {
                 isFileSource = true;
-                conn = { 
-                    id: 'multi-file-source', 
+                conn = {
+                    id: 'multi-file-source',
                     organization_id: organizationId,
-                    source_type: 'excel' 
+                    source_type: 'excel'
                 };
             }
         }
@@ -402,7 +402,14 @@ async function updateAnalysisApiLogByTaskId({
 function constructConnectionString(conn) {
     const user = encodeURIComponent(conn.username);
     const pass = encodeURIComponent(conn.password);
-    return `postgresql://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
+    if (conn.db_type === 'postgresql') {
+        return `postgresql://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
+    } else if (conn.db_type === 'mysql') {
+        return `mysql://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
+    } else if (conn.db_type === 'oracle') {
+        return `oracle://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
+    }
+    return `${conn.db_type}://${user}:${pass}@${conn.host}:${conn.port}/${conn.database_name}`;
 }
 
 function formatSchemaInfoEntry(columnName, dataType, enumValues = []) {
@@ -465,7 +472,7 @@ function canAccessColumnByDepartment(row, userContext = {}) {
 
 async function buildSemanticContext(conn, userContext = {}) {
     const isMultiFile = conn.id === 'multi-file-source';
-    
+
     const schemaQuery = isMultiFile
         ? `SELECT
             st.table_name,
@@ -555,7 +562,7 @@ async function buildSemanticContext(conn, userContext = {}) {
             : (conn.source_type === 'excel'
                 ? 'SELECT sr.source_table, sr.source_column, sr.target_table, sr.target_column, fs.filename as file_source_name FROM semantic_relationships sr JOIN file_sources fs ON sr.file_source_id = fs.id WHERE sr.file_source_id = $1'
                 : 'SELECT source_table, source_column, target_table, target_column FROM semantic_relationships WHERE connection_id = $1');
-        
+
         const storedRelationshipsResult = await db.query(relQuery, [isMultiFile ? conn.organization_id : conn.id]);
 
         storedRelationshipsResult.rows.forEach((relationship) => {
@@ -713,21 +720,13 @@ router.post('/analyze', authenticateToken, async (req, res) => {
         });
 
         console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
-        console.dir({
-            ...externalPayload,
-            db_config: {
-                ...externalPayload.db_config,
-                connection_string: '[REDACTED]',
-                password: '[REDACTED]'
-            }
-        }, { depth: null, maxArrayLength: null });
-
-        // 4. Call External Digital Ocean API
-        // Authorization header as provided in the user's example
+        console.log('📦 DASHBOARD_PAYLOAD:', JSON.stringify(externalPayload));
+        
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze';
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
+
             headers: {
                 'accept': 'application/json',
                 'Authorization': `Bearer ${API_KEY}`,
@@ -832,7 +831,7 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
 
         // 4. Call External Digital Ocean API for suggestions
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
             headers: {
@@ -1009,7 +1008,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
         console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', 'webhookUrl=', webhookUrl);
         console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(`${EXTERNAL_API_URL}?webhook_url=${encodeURIComponent(webhookUrl)}`, externalPayload, {
             headers: {
@@ -1035,7 +1034,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
         });
 
         console.log('✅ [ASYNC ANALYZE] Received task creation response');
-        
+
         // Deduct credits after successful task creation
         try {
             await creditService.deductCredits(organization_id, 1, {
@@ -1050,7 +1049,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             console.error('⚠️ Failed to deduct credits:', creditError.message);
             // Don't fail the request if credit deduction fails, just log it
         }
-        
+
         res.json(response.data);
 
         // kick off background polling in case webhook never arrives (e.g. local dev)
@@ -1106,7 +1105,7 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
             [organization_id, 'connected']
         );
 
-        
+
 
         let conn = null;
         let isFileSource = false;
@@ -1173,7 +1172,7 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
         });
 
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export';
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
             headers: {
@@ -1231,7 +1230,7 @@ router.get('/export/:exportId/status', authenticateToken, async (req, res) => {
     const { exportId } = req.params;
     try {
         const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export/${exportId}/status`;
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 accept: 'application/json',
@@ -1259,7 +1258,7 @@ router.get('/export/:exportId/download', authenticateToken, async (req, res) => 
     const { exportId } = req.params;
     try {
         const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export/${exportId}/download`;
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 accept: 'application/octet-stream',
@@ -1295,7 +1294,7 @@ router.get('/task/:taskId/status', authenticateToken, async (req, res) => {
 
     try {
         const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
@@ -1325,7 +1324,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
     try {
         await delay(1);
         const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
@@ -1352,7 +1351,7 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
 // background poller to keep frontends informed when webhook may not reach us
 async function pollTaskStatus(taskId, conversationId) {
     console.log('🔁 Starting poll for task', taskId);
-    const API_KEY = process.env.EXTERNAL_AI_API_KEY || 'ak_EX6ye1WXey55tjHLnI_c3hXGNpTJRy5F0DbOkw2otTA';
+    const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
     const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
     if (taskPollers.has(taskId)) {
         clearInterval(taskPollers.get(taskId));
@@ -1398,4 +1397,7 @@ async function pollTaskStatus(taskId, conversationId) {
 }
 
 
+
 module.exports = router;
+
+

@@ -84,3 +84,8 @@ scripts/dump_schema.js
 
 # Documentation
 docs/_build/
+
+# Temporary developer scratch scripts
+scratch/
+fetch_real.js
+payload.json
