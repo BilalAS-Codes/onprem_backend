@@ -4,6 +4,7 @@ const axios = require('axios');
 const db = require('../config/database');
 const creditService = require('../services/creditService');
 const { authenticateApiKey } = require('../middleware/apiKeyAuth');
+const { getAiBaseUrl, adjustPayload, normalizeResponse } = require('../helpers/aiHelper');
 
 // --- HELPER FUNCTIONS (Borrowed from publicChat.js) ---
 
@@ -63,7 +64,7 @@ function parseDepartmentAccess(rawAccess) {
     try {
         const parsed = JSON.parse(normalized);
         if (Array.isArray(parsed)) return { isAll: false, departmentIds: parsed.map(v => String(v).trim()).filter(Boolean) };
-    } catch (e) {}
+    } catch (e) { }
     return { isAll: false, departmentIds: normalized.split(',').map(v => String(v).trim()).filter(Boolean) };
 }
 
@@ -122,7 +123,7 @@ async function buildSemanticContext(conn, userContext = {}) {
             : `SELECT source_table, source_column, target_table, target_column FROM semantic_relationships WHERE connection_id = $1`;
         const relResult = await db.query(relQuery, [isMultiFile ? conn.organization_id : conn.id]);
         relResult.rows.forEach(r => relationships.push({ from_field: `${r.source_table}.${r.source_column}`, to_field: `${r.target_table}.${r.target_column}` }));
-    } catch (e) {}
+    } catch (e) { }
 
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
@@ -168,28 +169,29 @@ router.post('/chat', authenticateApiKey, async (req, res) => {
                 host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
                 schema_info: ctx.schemaInfo, relationships: ctx.relationships
             },
-            access_policy: { 
-                role: role.toLowerCase(), 
-                allowed_tables: ctx.allowedTables, 
-                disallowed_tables: ctx.disallowedTables, 
-                allowed_columns: ctx.allowedColumns, 
-                restricted_columns: ctx.restrictedColumns || {}, 
+            access_policy: {
+                role: role.toLowerCase(),
+                allowed_tables: ctx.allowedTables,
+                disallowed_tables: ctx.disallowedTables,
+                allowed_columns: ctx.allowedColumns,
+                restricted_columns: ctx.restrictedColumns || {},
                 row_level_filters: {},
-                max_rows: 1000, 
-                query_timeout_seconds: 30 
+                max_rows: 1000,
+                query_timeout_seconds: 30
             },
             question: message,
-            response_format: 'general', 
-            max_rows: 100, 
+            response_format: 'general',
+            max_rows: 100,
             locale: 'en',
             include_insights: true,
             include_visualizations: false // Visualizations are usually for the widget/dashboard
         };
+        const adjustedPayload = adjustPayload(payload);
 
         const AI_API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
-        const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
+        const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
 
-        const submitResponse = await axios.post(ASYNC_API_URL, payload, {
+        const submitResponse = await axios.post(ASYNC_API_URL, adjustedPayload, {
             headers: { 'Authorization': `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' },
             timeout: 45000
         });
@@ -200,11 +202,11 @@ router.post('/chat', authenticateApiKey, async (req, res) => {
         while (attempts < 45) {
             attempts++;
             await new Promise(r => setTimeout(r, 2000));
-            const statusRes = await axios.get(`https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
+            const statusRes = await axios.get(`${getAiBaseUrl()}/task/${taskId}/status`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
             const currentStatus = statusRes.data.data?.status;
             if (currentStatus === 'COMPLETED') {
-                const resRes = await axios.get(`https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
-                result = resRes.data.data?.result || resRes.data.data || resRes.data;
+                const resRes = await axios.get(`${getAiBaseUrl()}/task/${taskId}/result`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
+                result = normalizeResponse(resRes.data.data?.result || resRes.data.data || resRes.data);
                 break;
             } else if (['FAILED', 'CANCELLED'].includes(currentStatus)) throw new Error('AI analysis failed');
         }

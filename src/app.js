@@ -62,6 +62,8 @@ app.use('/api/public/whatsapp', whatsappRoutes);
 
 // Protected API Routes
 // Developer API (Uses API Key Auth)
+
+app.use('/api/v1', analysisRoutes);
 app.use('/api/v1', developerApiRoutes);
 
 app.use('/api/auth', authRoutes);
@@ -77,7 +79,6 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/', questionsRoutes)
-app.use('/api/v1', analysisRoutes);
 app.use('/api/v1/chats', chatRoutes);
 app.use('/api/v1/integrations', integrationRoutes);
 

@@ -3,6 +3,7 @@ const router = express.Router();
 const axios = require('axios');
 const db = require('../config/database');
 const creditService = require('../services/creditService');
+const { getAiBaseUrl, adjustPayload, areSuggestionsEnabled, normalizeResponse } = require('../helpers/aiHelper');
 
 // --- HELPER FUNCTIONS (Synced from analysis.js) ---
 
@@ -91,7 +92,7 @@ function canAccessColumnByDepartment(row, userContext = {}) {
 
     const userDeptId = userContext.department_id ? String(userContext.department_id).trim() : '';
     const userDeptIds = Array.isArray(userContext.department_ids) ? userContext.department_ids.map(id => String(id).trim()) : [];
-    
+
     // Check if ANY of the user's departments are in the allowed list
     if (userDeptId && departmentIds.includes(userDeptId)) return true;
     if (userDeptIds.some(id => departmentIds.includes(id))) return true;
@@ -176,7 +177,7 @@ async function buildSemanticContext(conn, userContext = {}) {
         relResult.rows.forEach(r => {
             relationships.push({ from_field: `${r.source_table}.${r.source_column}`, to_field: `${r.target_table}.${r.target_column}` });
         });
-    } catch (e) {}
+    } catch (e) { }
 
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
@@ -256,7 +257,7 @@ router.post('/chat', async (req, res) => {
 
         const { conn, isFileSource } = await getActiveSourceConfig(orgId);
         if (!conn) return res.status(404).json({ error: 'No active source' });
-        
+
         const ctx = await buildSemanticContext(conn, userContext);
 
         const payload = {
@@ -270,36 +271,38 @@ router.post('/chat', async (req, res) => {
                 host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
                 schema_info: ctx.schemaInfo, relationships: ctx.relationships
             },
-            access_policy: { 
-                role: userContext.role.toLowerCase(), 
-                allowed_tables: ctx.allowedTables, 
-                disallowed_tables: ctx.disallowedTables, 
-                allowed_columns: ctx.allowedColumns, 
-                restricted_columns: ctx.restrictedColumns || {}, 
+            access_policy: {
+                role: userContext.role.toLowerCase(),
+                allowed_tables: ctx.allowedTables,
+                disallowed_tables: ctx.disallowedTables,
+                allowed_columns: ctx.allowedColumns,
+                restricted_columns: ctx.restrictedColumns || {},
                 row_level_filters: {},
-                max_rows: 1000, 
-                query_timeout_seconds: 30 
+                max_rows: 1000,
+                query_timeout_seconds: 30
             },
             question: question,
-            response_format: 'general', 
-            max_rows: 100, 
+            response_format: 'general',
+            max_rows: 100,
             locale: 'en',
             include_insights: true,
             include_visualizations: true
         };
 
+        const adjustedPayload = adjustPayload(payload);
+
         // 3. TARGET THE ASYNC ENDPOINT
         const API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
-        const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
+        const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
 
         console.log(`🚀 [PUBLIC CHAT] Submitting Async Task to: ${ASYNC_API_URL}`);
-        console.log('📦 [PUBLIC CHAT] Payload:', JSON.stringify(payload, null, 2));
+        console.log('📦 [PUBLIC CHAT] Payload:', JSON.stringify(adjustedPayload, null, 2));
 
-        const submitResponse = await axios.post(ASYNC_API_URL, payload, {
-            headers: { 
+        const submitResponse = await axios.post(ASYNC_API_URL, adjustedPayload, {
+            headers: {
                 'accept': 'application/json',
-                'Authorization': `Bearer ${API_KEY}`, 
-                'Content-Type': 'application/json' 
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json'
             },
             timeout: 45000
         });
@@ -320,7 +323,7 @@ router.post('/chat', async (req, res) => {
             attempts++;
             await new Promise(resolve => setTimeout(resolve, 2000));
 
-            const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+            const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
             const statusResponse = await axios.get(statusUrl, {
                 headers: { 'Authorization': `Bearer ${API_KEY}` }
             });
@@ -332,13 +335,13 @@ router.post('/chat', async (req, res) => {
 
             if (currentStatus === 'COMPLETED') {
                 // Task is done! Get the result.
-                const resultUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
+                const resultUrl = `${getAiBaseUrl()}/task/${taskId}/result`;
                 const resultResponse = await axios.get(resultUrl, {
                     headers: { 'Authorization': `Bearer ${API_KEY}` }
                 });
-                
+
                 // Result is also nested in data
-                result = resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data;
+                result = normalizeResponse(resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data);
                 console.log('✅ [PUBLIC CHAT] Analysis Result Received:', JSON.stringify(result, null, 2));
                 break;
             } else if (currentStatus === 'FAILED' || currentStatus === 'CANCELLED') {
@@ -352,44 +355,46 @@ router.post('/chat', async (req, res) => {
 
         // --- NEW: FETCH SUGGESTIONS ---
         let suggested_queries = [];
-        try {
-            const SUGGEST_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
-            const suggestPayload = {
-                ...payload,
-                original_question: question,
-                num_suggestions: 3
-            };
-            delete suggestPayload.question;
-            delete suggestPayload.response_format;
-            delete suggestPayload.max_rows;
-            delete suggestPayload.include_insights;
-            delete suggestPayload.include_visualizations;
+        if (areSuggestionsEnabled()) {
+            try {
+                const SUGGEST_API_URL = `${getAiBaseUrl()}/suggest-queries`;
+                const suggestPayload = {
+                    ...adjustedPayload,
+                    original_question: question,
+                    num_suggestions: 3
+                };
+                delete suggestPayload.question;
+                delete suggestPayload.response_format;
+                delete suggestPayload.max_rows;
+                delete suggestPayload.include_insights;
+                delete suggestPayload.include_visualizations;
 
-            const suggestResponse = await axios.post(SUGGEST_API_URL, suggestPayload, {
-                headers: { 'Authorization': `Bearer ${API_KEY}` },
-                timeout: 10000
-            });
-            
-            // The AI service might return nested data or different keys
-            const respData = suggestResponse.data.data || suggestResponse.data;
-            const rawSuggestions = respData.suggestions || respData.suggested_queries || respData.suggested_questions || respData || [];
-            
-            if (Array.isArray(rawSuggestions)) {
-                suggested_queries = rawSuggestions.map(s => {
-                    if (typeof s === 'string') return s;
-                    if (typeof s === 'object') return s.question || s.text || s.query || '';
-                    return '';
-                }).filter(s => s.length > 0);
+                const suggestResponse = await axios.post(SUGGEST_API_URL, suggestPayload, {
+                    headers: { 'Authorization': `Bearer ${API_KEY}` },
+                    timeout: 10000
+                });
+
+                // The AI service might return nested data or different keys
+                const respData = suggestResponse.data.data || suggestResponse.data;
+                const rawSuggestions = respData.suggestions || respData.suggested_queries || respData.suggested_questions || respData || [];
+
+                if (Array.isArray(rawSuggestions)) {
+                    suggested_queries = rawSuggestions.map(s => {
+                        if (typeof s === 'string') return s;
+                        if (typeof s === 'object') return s.question || s.text || s.query || '';
+                        return '';
+                    }).filter(s => s.length > 0);
+                }
+                console.log(`💡 [PUBLIC CHAT] Fetched ${suggested_queries.length} suggestions`);
+            } catch (e) {
+                console.error('⚠️ [PUBLIC CHAT] Failed to fetch suggestions:', e.message);
+                // Fallback suggestions based on context if possible, otherwise generic
+                suggested_queries = [
+                    "Show me the top 5 records",
+                    "Summarize this data for me",
+                    "Are there any notable trends?"
+                ];
             }
-            console.log(`💡 [PUBLIC CHAT] Fetched ${suggested_queries.length} suggestions`);
-        } catch (e) {
-            console.error('⚠️ [PUBLIC CHAT] Failed to fetch suggestions:', e.message);
-            // Fallback suggestions based on context if possible, otherwise generic
-            suggested_queries = [
-                "Show me the top 5 records",
-                "Summarize this data for me",
-                "Are there any notable trends?"
-            ];
         }
 
         // Attach suggestions to the result (normalize to both common names for parity)
@@ -498,7 +503,7 @@ router.post('/chat', async (req, res) => {
                         'UPDATE chat_conversations SET updated_at = CURRENT_TIMESTAMP, last_message_at = CURRENT_TIMESTAMP WHERE id = $1',
                         [conversationId]
                     );
-                    
+
                     console.log(`✅ [PUBLIC CHAT] Synced anonymous query to Admin's "Public Inquiries"`);
                 }
             } catch (syncErr) {
@@ -511,7 +516,7 @@ router.post('/chat', async (req, res) => {
     } catch (err) {
         const errorMsg = err.response?.data || err.message;
         console.error('❌ [PUBLIC CHAT] AI Error:', errorMsg);
-        
+
         // NEW: Sync the Error to Dashboard History so Admin/User knows it failed
         if (req._orgId) {
             try {
@@ -577,8 +582,8 @@ router.post('/chat', async (req, res) => {
             }
         }
 
-        res.status(err.response?.status || 500).json({ 
-            error: 'I encountered an issue processing your request. Please try again in a moment or rephrase your question.' 
+        res.status(err.response?.status || 500).json({
+            error: 'I encountered an issue processing your request. Please try again in a moment or rephrase your question.'
         });
     }
 });

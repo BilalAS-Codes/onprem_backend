@@ -7,6 +7,7 @@ const XLSX = require('xlsx');
 const db = require('../config/database');
 const creditService = require('../services/creditService');
 const whatsappService = require('../services/whatsappService');
+const { getAiBaseUrl, adjustPayload, normalizeResponse } = require('../helpers/aiHelper');
 
 // --- HELPER FUNCTIONS FOR CONTEXT BUILDING (Synced from publicChat.js) ---
 
@@ -95,7 +96,7 @@ function canAccessColumnByDepartment(row, userContext = {}) {
 
     const userDeptId = userContext.department_id ? String(userContext.department_id).trim() : '';
     const userDeptIds = Array.isArray(userContext.department_ids) ? userContext.department_ids.map(id => String(id).trim()) : [];
-    
+
     if (userDeptId && departmentIds.includes(userDeptId)) return true;
     if (userDeptIds.some(id => departmentIds.includes(id))) return true;
 
@@ -178,7 +179,7 @@ async function buildSemanticContext(conn, userContext = {}) {
         relResult.rows.forEach(r => {
             relationships.push({ from_field: `${r.source_table}.${r.source_column}`, to_field: `${r.target_table}.${r.target_column}` });
         });
-    } catch (e) {}
+    } catch (e) { }
 
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
@@ -188,16 +189,16 @@ function generateExcelReport(dataRows, columns, orgId) {
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(dataRows, { header: columns });
     XLSX.utils.book_append_sheet(wb, ws, "Query Results");
-    
+
     const reportsDir = path.join(__dirname, '..', '..', 'public', 'reports');
     if (!fs.existsSync(reportsDir)) {
         fs.mkdirSync(reportsDir, { recursive: true });
     }
-    
+
     const filename = `Report_${orgId}_${Date.now()}.xlsx`;
     const filepath = path.join(reportsDir, filename);
     XLSX.writeFile(wb, filepath);
-    
+
     return filename;
 }
 
@@ -211,7 +212,7 @@ router.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-    
+
     if (mode && token) {
         const verifyToken = process.env.META_VERIFY_TOKEN || 'zeroqueries_meta_token';
         if (mode === 'subscribe' && token === verifyToken) {
@@ -219,7 +220,7 @@ router.get('/webhook', (req, res) => {
             return res.status(200).send(challenge);
         }
     }
-    
+
     // Twilio Webhook setup verification or simple fallback
     return res.status(200).json({ status: 'active', message: 'ZeroQueries WhatsApp Webhook is ready.' });
 });
@@ -277,7 +278,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
         let conversationId = null;
         let integration = null;
         let config = null;
-        
+
         try {
             console.log(`📥 [WHATSAPP WEBHOOK] Received message from ${senderPhone} (Receiver: ${receiverPhone}, Provider: ${provider})`);
 
@@ -294,7 +295,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 const config = row.config || {};
                 const cleanConfigPhone = String(config.phone_number || '').replace(/[^0-9]/g, '');
                 const cleanReceiverPhone = receiverPhone.replace(/[^0-9]/g, '');
-                
+
                 return (
                     cleanConfigPhone === cleanReceiverPhone ||
                     String(config.meta_phone_id) === String(metaPhoneId)
@@ -313,8 +314,8 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             const userContext = {
                 role: integration.role_name || 'Admin',
                 department_id: integration.target_department_id,
-                department_ids: Array.isArray(integration.target_department_ids) 
-                    ? integration.target_department_ids 
+                department_ids: Array.isArray(integration.target_department_ids)
+                    ? integration.target_department_ids
                     : (integration.target_department_id ? [integration.target_department_id] : [])
             };
 
@@ -336,13 +337,13 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     [orgId]
                 );
                 const targetUserId = adminRes.rows.length > 0 ? adminRes.rows[0].id : null;
-                
+
                 const newConv = await db.query(
                     'INSERT INTO chat_conversations (organization_id, user_id, title) VALUES ($1, $2, $3) RETURNING id',
                     [orgId, targetUserId, `WhatsApp: ${senderPhone}`]
                 );
                 conversationId = newConv.rows[0].id;
-                
+
                 await db.query(
                     'INSERT INTO whatsapp_conversations (integration_id, sender_phone, conversation_id) VALUES ($1, $2, $3)',
                     [integration.id, senderPhone, conversationId]
@@ -387,33 +388,35 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
                     schema_info: ctx.schemaInfo, relationships: ctx.relationships
                 },
-                access_policy: { 
-                    role: userContext.role.toLowerCase(), 
-                    allowed_tables: ctx.allowedTables, 
-                    disallowed_tables: ctx.disallowedTables, 
-                    allowed_columns: ctx.allowedColumns, 
-                    restricted_columns: ctx.restrictedColumns || {}, 
+                access_policy: {
+                    role: userContext.role.toLowerCase(),
+                    allowed_tables: ctx.allowedTables,
+                    disallowed_tables: ctx.disallowedTables,
+                    allowed_columns: ctx.allowedColumns,
+                    restricted_columns: ctx.restrictedColumns || {},
                     row_level_filters: {},
-                    max_rows: 1000, 
-                    query_timeout_seconds: 30 
+                    max_rows: 1000,
+                    query_timeout_seconds: 30
                 },
                 question: question,
-                response_format: 'general', 
-                max_rows: 100, 
+                response_format: 'general',
+                max_rows: 100,
                 locale: 'en',
                 include_insights: true,
                 include_visualizations: false
             };
 
+            const adjustedPayload = adjustPayload(payload);
+
             const API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
-            const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
+            const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
 
             // Submit async parsing task to AI engine
-            const submitResponse = await axios.post(ASYNC_API_URL, payload, {
-                headers: { 
+            const submitResponse = await axios.post(ASYNC_API_URL, adjustedPayload, {
+                headers: {
                     'accept': 'application/json',
-                    'Authorization': `Bearer ${API_KEY}`, 
-                    'Content-Type': 'application/json' 
+                    'Authorization': `Bearer ${API_KEY}`,
+                    'Content-Type': 'application/json'
                 },
                 timeout: 45000
             });
@@ -432,7 +435,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 attempts++;
                 await new Promise(resolve => setTimeout(resolve, 2000));
 
-                const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+                const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
                 const statusResponse = await axios.get(statusUrl, {
                     headers: { 'Authorization': `Bearer ${API_KEY}` }
                 });
@@ -440,12 +443,12 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 const currentStatus = statusResponse.data.data?.status || 'UNKNOWN';
 
                 if (currentStatus === 'COMPLETED') {
-                    const resultUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
+                    const resultUrl = `${getAiBaseUrl()}/task/${taskId}/result`;
                     const resultResponse = await axios.get(resultUrl, {
                         headers: { 'Authorization': `Bearer ${API_KEY}` }
                     });
-                    
-                    result = resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data;
+
+                    result = normalizeResponse(resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data);
                     break;
                 } else if (currentStatus === 'FAILED' || currentStatus === 'CANCELLED') {
                     throw new Error(`AI Task failed with status: ${currentStatus}`);
@@ -522,13 +525,13 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             // 9. Generate and deliver Excel spreadsheet report if results contain rows/data
             if (Array.isArray(queryData) && queryData.length > 0 && Array.isArray(columns) && columns.length > 0) {
                 const excelFilename = generateExcelReport(queryData, columns, orgId);
-                
+
                 // Construct file URL
                 const hostUrl = process.env.BASE_URL || `http://${req.get('host')}`;
                 const fileUrl = `${hostUrl}/reports/${excelFilename}`;
-                
+
                 console.log(`📊 [WHATSAPP WEBHOOK] Sending report excel sheet URL: ${fileUrl}`);
-                
+
                 // Wait for file write and send attachment
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 await whatsappService.sendDocument(senderPhone, fileUrl, 'Query_Result_Report.xlsx', config);
@@ -544,7 +547,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
         } catch (err) {
             const errorMsg = err.response?.data || err.message;
             console.error('❌ [WHATSAPP WEBHOOK ERROR]:', errorMsg);
-            
+
             try {
                 fs.appendFileSync(
                     path.join(__dirname, '../../whatsapp_error.log'),
@@ -553,7 +556,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             } catch (fsErr) {
                 console.error('Failed to write local error log:', fsErr);
             }
-            
+
             // Log usage failure
             if (integration) {
                 const orgId = integration.target_organization_id || integration.organization_id;
