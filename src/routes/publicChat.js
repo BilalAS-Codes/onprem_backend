@@ -182,6 +182,31 @@ async function buildSemanticContext(conn, userContext = {}) {
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
 
+// --- GREETING DETECTION ---
+
+/**
+ * Returns true if the user's message is a greeting and not a real query.
+ * Strips punctuation and checks against a list of common greetings.
+ */
+function isGreeting(text) {
+    const cleaned = String(text || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '') // strip punctuation
+        .replace(/\s+/g, ' ');
+
+    const GREETINGS = [
+        'hi', 'hello', 'hey', 'hii', 'hiii', 'hola',
+        'hi there', 'hello there', 'hey there',
+        'good morning', 'good afternoon', 'good evening', 'good night',
+        'greetings', 'howdy', 'whats up', 'what up', 'sup',
+        'yo', 'hi bot', 'hello bot', 'hey bot',
+        'start', 'begin', 'help'
+    ];
+
+    return GREETINGS.includes(cleaned);
+}
+
 // --- PUBLIC CHAT ROUTE ---
 
 /**
@@ -288,12 +313,116 @@ router.post('/chat', async (req, res) => {
             include_insights: true,
             include_visualizations: true
         };
-
+      
         const adjustedPayload = adjustPayload(payload);
 
         // 3. TARGET THE ASYNC ENDPOINT
+
         const API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
+
+        // --- GREETING SHORTCUT ---
+        // If the user sent a greeting, skip the expensive AI analysis.
+        // Call the suggest API to get schema-aware query suggestions and return immediately.
+        if (isGreeting(question)) {
+            console.log(`👋 [PUBLIC CHAT] Greeting detected: "${question}". Fetching suggestions...`);
+
+            // Greetings are always FREE — no credit deducted regardless of suggest API outcome
+            let suggested_queries = [];
+
+            try {
+                const SUGGEST_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
+                const suggestPayload = {
+                    ...payload,
+                    original_question: 'What can I ask?',
+                    num_suggestions: 3
+                };
+                delete suggestPayload.question;
+                delete suggestPayload.response_format;
+                delete suggestPayload.max_rows;
+                delete suggestPayload.include_insights;
+                delete suggestPayload.include_visualizations;
+
+                const suggestResponse = await axios.post(SUGGEST_API_URL, suggestPayload, {
+                    headers: { 'Authorization': `Bearer ${API_KEY}` },
+                    timeout: 10000
+                });
+
+                const respData = suggestResponse.data.data || suggestResponse.data;
+                const rawSuggestions = respData.suggestions || respData.suggested_queries || respData.suggested_questions || [];
+
+                if (Array.isArray(rawSuggestions)) {
+                    suggested_queries = rawSuggestions.map(s => {
+                        if (typeof s === 'string') return s;
+                        if (typeof s === 'object') return s.question || s.text || s.query || '';
+                        return '';
+                    }).filter(s => s.length > 0);
+                }
+
+                console.log(`💡 [PUBLIC CHAT] Greeting: fetched ${suggested_queries.length} schema-aware suggestions (no credit deducted)`);
+
+            } catch (suggestErr) {
+                // Suggest API failed — use generic fallback (still no credit deducted)
+                console.warn('⚠️ [PUBLIC CHAT] Greeting suggest API failed, using free fallback:', suggestErr.message);
+                suggested_queries = [
+                    'Show me the top 5 records',
+                    'What is the total count of entries?',
+                    'Summarize the latest data for me'
+                ];
+            }
+
+            const greetingResult = {
+                execution_metadata: {
+                    ai_summary: `👋 Hello! I'm your data assistant. Here are some questions you can ask me about your data:`
+                },
+                suggested_queries,
+                suggested_questions: suggested_queries
+            };
+
+            // Log the integration activity
+            await db.query(
+                `INSERT INTO integration_logs (integration_id, organization_id, endpoint, status, duration_ms, request_payload, response_payload)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [integration.id, orgId, '/api/public/chat', 'greeting', Date.now() - startedAt,
+                 JSON.stringify({ question }), JSON.stringify(greetingResult)]
+            );
+
+            // Sync to dashboard history
+            const authHeader = req.headers.authorization;
+            if (authHeader && authHeader.startsWith('Bearer ')) {
+                const token = authHeader.split(' ')[1];
+                try {
+                    const jwt = require('jsonwebtoken');
+                    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+                    const userId = decoded.id;
+                    let convResult = await db.query(
+                        'SELECT id FROM chat_conversations WHERE user_id = $1 AND title = $2 LIMIT 1',
+                        [userId, 'Public Chatbot']
+                    );
+                    let conversationId;
+                    if (convResult.rows.length === 0) {
+                        const newConv = await db.query(
+                            'INSERT INTO chat_conversations (organization_id, user_id, title) VALUES ($1, $2, $3) RETURNING id',
+                            [orgId, userId, 'Public Chatbot']
+                        );
+                        conversationId = newConv.rows[0].id;
+                    } else {
+                        conversationId = convResult.rows[0].id;
+                    }
+                    await db.query('INSERT INTO chat_messages (conversation_id, role, content) VALUES ($1, $2, $3)', [conversationId, 'user', question]);
+                    await db.query('INSERT INTO chat_messages (conversation_id, role, content) VALUES ($1, $2, $3)', [conversationId, 'assistant', greetingResult.execution_metadata.ai_summary]);
+                    await db.query('UPDATE chat_conversations SET updated_at = CURRENT_TIMESTAMP, last_message_at = CURRENT_TIMESTAMP WHERE id = $1', [conversationId]);
+                } catch (authErr) {
+                    console.warn('⚠️ [PUBLIC CHAT] Greeting dashboard sync failed:', authErr.message);
+                }
+            }
+
+            return res.json(greetingResult);
+        }
+        // --- END GREETING SHORTCUT ---
+
+        // 3. TARGET THE ASYNC ENDPOINT
         const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
+//         const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
 
         console.log(`🚀 [PUBLIC CHAT] Submitting Async Task to: ${ASYNC_API_URL}`);
         console.log('📦 [PUBLIC CHAT] Payload:', JSON.stringify(adjustedPayload, null, 2));

@@ -33,7 +33,8 @@
     const init = async () => {
         try {
             // Load all dependencies
-            const version = '26';
+            const version = '27';
+
             await Promise.all([
                 loadScript('https://cdn.plot.ly/plotly-2.27.0.min.js'),
                 loadScript(`${baseUrl}/widgets/chatbot-api.js?v=${version}`),

@@ -62,6 +62,29 @@ class WhatsappService {
         }
     }
 
+    /**
+     * Send an image attachment to a WhatsApp user (useful for graphs)
+     * @param {string} to - Recipient phone number
+     * @param {string} imageUrl - Public URL of the image
+     * @param {object} config - Integration config containing provider credentials
+     */
+    async sendImage(to, imageUrl, config) {
+        if (this.isMockConfig(config)) {
+            console.log(`📡 [MOCK WHATSAPP IMAGE DELIVERY] To: ${to}, URL: ${imageUrl}`);
+            return { sid: `SMmock_img_${Date.now()}`, status: 'queued' };
+        }
+
+        const provider = (config.provider || 'twilio').toLowerCase();
+        
+        if (provider === 'twilio') {
+            return this.sendTwilioImage(to, imageUrl, config);
+        } else if (provider === 'meta') {
+            return this.sendMetaImage(to, imageUrl, config);
+        } else {
+            throw new Error(`Unsupported WhatsApp provider: ${provider}`);
+        }
+    }
+
     // --- TWILIO API IMPLEMENTATION ---
 
     async sendTwilioText(to, text, config) {
@@ -107,6 +130,34 @@ class WhatsappService {
         params.append('MediaUrl', fileUrl);
 
         console.log(`📤 Sending Twilio WhatsApp PDF to ${to} from ${phone_number}. URL: ${fileUrl}`);
+
+        const response = await axios.post(url, params, {
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+        });
+
+        return response.data;
+    }
+
+    async sendTwilioImage(to, imageUrl, config) {
+        // Twilio treats images and documents both via MediaUrl
+        const { twilio_account_sid, twilio_auth_token, phone_number } = config;
+        
+        if (!twilio_account_sid || !twilio_auth_token || !phone_number) {
+            throw new Error('Missing Twilio credentials in integration config');
+        }
+
+        const url = `https://api.twilio.com/2010-04-01/Accounts/${twilio_account_sid}/Messages.json`;
+        const auth = Buffer.from(`${twilio_account_sid}:${twilio_auth_token}`).toString('base64');
+        
+        const params = new URLSearchParams();
+        params.append('From', `whatsapp:${phone_number}`);
+        params.append('To', `whatsapp:${to}`);
+        params.append('MediaUrl', imageUrl);
+
+        console.log(`📤 Sending Twilio WhatsApp Image to ${to} from ${phone_number}. URL: ${imageUrl}`);
 
         const response = await axios.post(url, params, {
             headers: {
@@ -176,6 +227,38 @@ class WhatsappService {
         };
 
         console.log(`📤 Sending Meta Cloud API WhatsApp PDF to ${cleanTo}. URL: ${fileUrl}`);
+
+        const response = await axios.post(url, payload, {
+            headers: {
+                'Authorization': `Bearer ${meta_access_token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        return response.data;
+    }
+
+    async sendMetaImage(to, imageUrl, config) {
+        const { meta_phone_id, meta_access_token } = config;
+        
+        if (!meta_phone_id || !meta_access_token) {
+            throw new Error('Missing Meta Cloud API credentials in integration config');
+        }
+
+        const cleanTo = to.replace(/[^0-9]/g, '');
+        const url = `https://graph.facebook.com/v19.0/${meta_phone_id}/messages`;
+        
+        const payload = {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: cleanTo,
+            type: 'image',
+            image: {
+                link: imageUrl
+            }
+        };
+
+        console.log(`📤 Sending Meta Cloud API WhatsApp Image to ${cleanTo}. URL: ${imageUrl}`);
 
         const response = await axios.post(url, payload, {
             headers: {

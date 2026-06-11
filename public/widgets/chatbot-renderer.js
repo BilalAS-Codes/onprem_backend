@@ -17,6 +17,15 @@ const ChatbotRenderer = (() => {
     };
 
     const renderActions = (data) => {
+        // Only show actions when there is real data to export/download
+        const hasTableData = data.data?.data?.length > 0;
+        const hasKPIs = data.kpis?.length > 0;
+        const hasVisualizations = data.visualizations?.length > 0;
+
+        if (!hasTableData && !hasKPIs && !hasVisualizations) {
+            return ''; // greeting / text-only response — hide the button
+        }
+
         const time = data.execution_metadata?.total_time ? `${data.execution_metadata.total_time.toFixed(2)} s` : '';
         const rows = data.data?.row_count ? `${data.data.row_count} rows` : '';
 
@@ -32,6 +41,7 @@ const ChatbotRenderer = (() => {
             </div>
         `;
     };
+
 
     const renderReportHtml = (data) => {
         const dateStr = new Date().toLocaleString();

@@ -123,6 +123,30 @@ const emailService = {
     };
 
     await transporter.sendMail(mailOptions);
+  },
+
+  async sendOtp({ to, otpCode, chatbotName = 'WhatsApp Bot' }) {
+    const transporter = createTransporter();
+    const mailOptions = {
+      from: `"ZeroQueries" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+      to,
+      subject: `Verification Code for ZeroQueries ${chatbotName}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <h2 style="color: #4f46e5; margin-bottom: 16px;">ZeroQueries Verification</h2>
+          <p>Hello,</p>
+          <p>You have requested a secure verification code to access the ZeroQueries WhatsApp chatbot (<strong>${chatbotName}</strong>).</p>
+          <div style="background-color: #f3f4f6; border-radius: 8px; padding: 16px; text-align: center; margin: 24px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 4px; color: #1e1b4b;">${otpCode}</span>
+          </div>
+          <p>This verification code is valid for 15 minutes. Please do not share this code with anyone.</p>
+          <br>
+          <p>Best regards,<br>The ZeroQueries Team</p>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
   }
 };
 
