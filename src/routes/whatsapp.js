@@ -7,6 +7,7 @@ const XLSX = require('xlsx');
 const db = require('../config/database');
 const creditService = require('../services/creditService');
 const whatsappService = require('../services/whatsappService');
+const chartService = require('../services/chartService');
 
 // --- HELPER FUNCTIONS FOR CONTEXT BUILDING (Synced from publicChat.js) ---
 
@@ -95,7 +96,7 @@ function canAccessColumnByDepartment(row, userContext = {}) {
 
     const userDeptId = userContext.department_id ? String(userContext.department_id).trim() : '';
     const userDeptIds = Array.isArray(userContext.department_ids) ? userContext.department_ids.map(id => String(id).trim()) : [];
-    
+
     if (userDeptId && departmentIds.includes(userDeptId)) return true;
     if (userDeptIds.some(id => departmentIds.includes(id))) return true;
 
@@ -178,7 +179,7 @@ async function buildSemanticContext(conn, userContext = {}) {
         relResult.rows.forEach(r => {
             relationships.push({ from_field: `${r.source_table}.${r.source_column}`, to_field: `${r.target_table}.${r.target_column}` });
         });
-    } catch (e) {}
+    } catch (e) { }
 
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
@@ -188,17 +189,42 @@ function generateExcelReport(dataRows, columns, orgId) {
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(dataRows, { header: columns });
     XLSX.utils.book_append_sheet(wb, ws, "Query Results");
-    
+
     const reportsDir = path.join(__dirname, '..', '..', 'public', 'reports');
     if (!fs.existsSync(reportsDir)) {
         fs.mkdirSync(reportsDir, { recursive: true });
     }
-    
+
     const filename = `Report_${orgId}_${Date.now()}.xlsx`;
     const filepath = path.join(reportsDir, filename);
     XLSX.writeFile(wb, filepath);
-    
+
     return filename;
+}
+
+// --- GREETING DETECTION ---
+
+/**
+ * Returns true if the user's message is a greeting and not a real query.
+ * Strips punctuation and checks against a list of common greetings.
+ */
+function isGreeting(text) {
+    const cleaned = String(text || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '') // strip punctuation
+        .replace(/\s+/g, ' ');
+
+    const GREETINGS = [
+        'hi', 'hello', 'hey', 'hii', 'hiii', 'hola',
+        'hi there', 'hello there', 'hey there',
+        'good morning', 'good afternoon', 'good evening', 'good night',
+        'greetings', 'howdy', 'whats up', 'what up', 'sup',
+        'yo', 'hi bot', 'hello bot', 'hey bot',
+        'start', 'begin', 'help'
+    ];
+
+    return GREETINGS.includes(cleaned);
 }
 
 // --- WEBHOOK ENDPOINTS ---
@@ -211,7 +237,7 @@ router.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-    
+
     if (mode && token) {
         const verifyToken = process.env.META_VERIFY_TOKEN || 'zeroqueries_meta_token';
         if (mode === 'subscribe' && token === verifyToken) {
@@ -219,7 +245,7 @@ router.get('/webhook', (req, res) => {
             return res.status(200).send(challenge);
         }
     }
-    
+
     // Twilio Webhook setup verification or simple fallback
     return res.status(200).json({ status: 'active', message: 'ZeroQueries WhatsApp Webhook is ready.' });
 });
@@ -277,7 +303,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
         let conversationId = null;
         let integration = null;
         let config = null;
-        
+
         try {
             console.log(`📥 [WHATSAPP WEBHOOK] Received message from ${senderPhone} (Receiver: ${receiverPhone}, Provider: ${provider})`);
 
@@ -294,7 +320,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 const config = row.config || {};
                 const cleanConfigPhone = String(config.phone_number || '').replace(/[^0-9]/g, '');
                 const cleanReceiverPhone = receiverPhone.replace(/[^0-9]/g, '');
-                
+
                 return (
                     cleanConfigPhone === cleanReceiverPhone ||
                     String(config.meta_phone_id) === String(metaPhoneId)
@@ -308,45 +334,226 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
 
             const orgId = integration.target_organization_id || integration.organization_id;
             config = integration.config || {};
+            const isPrivate = config.chat_type === 'private';
+            let authorizedUserId = null;
+            let authorizedUserEmail = null;
+            let authorizedUserName = null;
 
-            // Mapped role & department scopes
+            // Mapped role & department scopes (Default for Public, will be overridden for Private)
             const userContext = {
                 role: integration.role_name || 'Admin',
                 department_id: integration.target_department_id,
-                department_ids: Array.isArray(integration.target_department_ids) 
-                    ? integration.target_department_ids 
+                department_ids: Array.isArray(integration.target_department_ids)
+                    ? integration.target_department_ids
                     : (integration.target_department_id ? [integration.target_department_id] : [])
+            };
+
+            if (isPrivate) {
+                const cleanSenderPhone = senderPhone.trim().replace(/[^\+0-9]/g, '');
+                const authRes = await db.query(
+                    `SELECT wan.user_id, u.email, u.full_name
+                     FROM whatsapp_authorized_numbers wan
+                     JOIN users u ON wan.user_id = u.id
+                     WHERE wan.integration_id = $1 AND (wan.mobile_number = $2 OR REPLACE(wan.mobile_number, '+', '') = $3)`,
+                    [integration.id, cleanSenderPhone, cleanSenderPhone.replace('+', '')]
+                );
+
+                if (authRes.rows.length === 0) {
+                    console.log(`🚫 [WHATSAPP PRIVATE BLOCK] Unauthorized sender: ${senderPhone} trying to access bot ${integration.id}`);
+                    const blockMsg = '⛔ *Access Denied.*\nYour phone number is not authorized to access this secure ZeroQueries chatbot. Please contact your administrator to authorize your phone number.';
+                    await whatsappService.sendText(senderPhone, blockMsg, config);
+
+                    // Log usage log for unauthorized try
+                    await db.query(
+                        `INSERT INTO integration_logs (integration_id, organization_id, endpoint, status, duration_ms, request_payload, error_message)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                        [integration.id, orgId, '/api/public/whatsapp/webhook', 'unauthorized', Date.now() - startedAt, JSON.stringify({ question }), 'Sender number unauthorized']
+                    );
+                    return;
+                }
+
+                authorizedUserId = authRes.rows[0].user_id;
+                authorizedUserEmail = authRes.rows[0].email;
+                authorizedUserName = authRes.rows[0].full_name;
+
+                // Override user context using live permissions of the linked system user
+                const liveUserRes = await db.query(
+                    `SELECT u.*, r.name as role_name 
+                     FROM users u
+                     LEFT JOIN roles r ON u.role_id = r.id
+                     WHERE u.id = $1`,
+                    [authorizedUserId]
+                );
+
+                if (liveUserRes.rows.length > 0) {
+                    const liveUser = liveUserRes.rows[0];
+                    userContext.role = liveUser.role_name || 'Viewer';
+                    userContext.department_id = liveUser.department_id;
+                    userContext.department_ids = liveUser.department_id ? [liveUser.department_id] : [];
+                }
+            }
+
+            // Helper to send OTP and display instructions
+            const sendOtpAndPrompt = async (convId, isNew = true) => {
+                const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+                const otpExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+
+                if (isNew) {
+                    await db.query(
+                        `INSERT INTO whatsapp_conversations (integration_id, sender_phone, conversation_id, is_verified, otp_code, otp_expires_at, user_id, last_activity_at)
+                         VALUES ($1, $2, $3, false, $4, $5, $6, NOW())`,
+                        [integration.id, senderPhone, convId, otpCode, otpExpiresAt, authorizedUserId]
+                    );
+                } else {
+                    await db.query(
+                        `UPDATE whatsapp_conversations
+                         SET is_verified = false, otp_code = $1, otp_expires_at = $2, last_activity_at = NOW()
+                         WHERE integration_id = $3 AND sender_phone = $4`,
+                        [otpCode, otpExpiresAt, integration.id, senderPhone]
+                    );
+                }
+
+                const sendEmail = config.otp_email_enabled !== false; // default true
+                const sendWhatsapp = config.otp_whatsapp_enabled === true; // default false
+
+                const sentTo = [];
+                if (sendWhatsapp) {
+                    const text = `🔑 Your ZeroQueries verification code is: *${otpCode}*.\nIt is valid for 15 minutes.`;
+                    await whatsappService.sendText(senderPhone, text, config);
+                    sentTo.push('WhatsApp');
+                }
+                if (sendEmail && authorizedUserEmail) {
+                    const emailService = require('../services/emailService');
+                    await emailService.sendOtp({
+                        to: authorizedUserEmail,
+                        otpCode,
+                        chatbotName: config.phone_number || 'WhatsApp Bot'
+                    });
+                    sentTo.push('Email');
+                }
+
+                const sentToStr = sentTo.length > 0 ? sentTo.join(' and ') : 'Email';
+
+                const welcomeMsg = isNew
+                    ? `👋 *Welcome to ZeroQueries!*\n\nTo secure your account, a 6-digit verification code has been sent to your *${sentToStr}*.\n\nPlease reply with the code to verify your identity.`
+                    : `⚠️ *Session expired or verification required.*\n\nA verification code has been sent to your *${sentToStr}*.\n\nPlease reply with the code to verify.`;
+
+                await whatsappService.sendText(senderPhone, welcomeMsg, config);
             };
 
             // 3. Resolve active WhatsApp session mapping
             const mappedRes = await db.query(
-                'SELECT conversation_id FROM whatsapp_conversations WHERE integration_id = $1 AND sender_phone = $2 LIMIT 1',
+                'SELECT * FROM whatsapp_conversations WHERE integration_id = $1 AND sender_phone = $2 LIMIT 1',
                 [integration.id, senderPhone]
             );
 
-            if (mappedRes.rows.length > 0) {
-                conversationId = mappedRes.rows[0].conversation_id;
-            } else {
-                // Fallback to finding Organization Admin user id to tie the conversation context
-                const adminRes = await db.query(
-                    `SELECT u.id FROM users u 
-                     JOIN roles r ON u.role_id = r.id 
-                     WHERE u.organization_id = $1 AND r.name = 'Admin' 
-                     ORDER BY u.created_at ASC LIMIT 1`,
-                    [orgId]
-                );
-                const targetUserId = adminRes.rows.length > 0 ? adminRes.rows[0].id : null;
-                
-                const newConv = await db.query(
-                    'INSERT INTO chat_conversations (organization_id, user_id, title) VALUES ($1, $2, $3) RETURNING id',
-                    [orgId, targetUserId, `WhatsApp: ${senderPhone}`]
-                );
-                conversationId = newConv.rows[0].id;
-                
+            if (isPrivate) {
+                let session = mappedRes.rows[0];
+
+                if (!session) {
+                    // Start new conversation
+                    const newConv = await db.query(
+                        'INSERT INTO chat_conversations (organization_id, user_id, title) VALUES ($1, $2, $3) RETURNING id',
+                        [orgId, authorizedUserId, `WhatsApp Private: ${senderPhone}`]
+                    );
+                    conversationId = newConv.rows[0].id;
+                    await sendOtpAndPrompt(conversationId, true);
+                    return;
+                }
+
+                conversationId = session.conversation_id;
+
+                if (!session.is_verified) {
+                    const cleanQuestion = question.trim();
+                    if (session.otp_code && cleanQuestion === session.otp_code) {
+                        const now = new Date();
+                        if (new Date(session.otp_expires_at) > now) {
+                            await db.query(
+                                `UPDATE whatsapp_conversations
+                                 SET is_verified = true, verified_at = NOW(), last_activity_at = NOW(), otp_code = NULL, otp_expires_at = NULL
+                                 WHERE integration_id = $1 AND sender_phone = $2`,
+                                [integration.id, senderPhone]
+                            );
+                            const successMsg = `✅ *Verification Successful!*\n\nWelcome back, *${authorizedUserName}*. Your secure session is now active.\n\nYou can ask me questions about your database now.\n\n_Tip: Type *logout* or *exit* at any time to end your session._`;
+                            await whatsappService.sendText(senderPhone, successMsg, config);
+                            return;
+                        } else {
+                            // Expired
+                            await sendOtpAndPrompt(conversationId, false);
+                            return;
+                        }
+                    } else {
+                        // Check if user is asking for a new code or starting over
+                        const cleanQuestionLower = cleanQuestion.toLowerCase();
+                        if (['resend', 'hi', 'hello', 'hey', 'start'].includes(cleanQuestionLower) || isGreeting(cleanQuestion)) {
+                            await sendOtpAndPrompt(conversationId, false);
+                            return;
+                        } else if (/^\d{6}$/.test(cleanQuestion)) {
+                            await whatsappService.sendText(senderPhone, '❌ *Invalid verification code.* Please check the code and try again.\n\n_Tip: Type *resend* to get a new code._', config);
+                            return;
+                        } else {
+                            const promptMsg = `⚠️ *Verification Required.*\n\nPlease enter the 6-digit code sent to your verified channels to access your data.\n\n_Tip: Type *resend* to get a new code._`;
+                            await whatsappService.sendText(senderPhone, promptMsg, config);
+                            return;
+                        }
+                    }
+                }
+
+                // Session is verified, check 24-hour inactivity timeout
+                const now = new Date();
+                const lastActivity = new Date(session.last_activity_at);
+                const hoursDiff = (now - lastActivity) / (1000 * 60 * 60);
+
+                if (hoursDiff >= 24) {
+                    console.log(`⏳ [WHATSAPP SESSION EXPIRED] Sender ${senderPhone} session expired due to 24h inactivity.`);
+                    await sendOtpAndPrompt(conversationId, false);
+                    return;
+                }
+
+                // Check logout commands
+                const cleanQuestionLower = question.trim().toLowerCase();
+                if (['exit', 'logout', 'quit', 'end session'].includes(cleanQuestionLower)) {
+                    await db.query(
+                        'DELETE FROM whatsapp_conversations WHERE integration_id = $1 AND sender_phone = $2',
+                        [integration.id, senderPhone]
+                    );
+                    const logoutMsg = '👋 *Secure session ended successfully.*\n\nYou have been logged out. Send any message to initiate a new verification process.';
+                    await whatsappService.sendText(senderPhone, logoutMsg, config);
+                    return;
+                }
+
+                // Update activity time
                 await db.query(
-                    'INSERT INTO whatsapp_conversations (integration_id, sender_phone, conversation_id) VALUES ($1, $2, $3)',
-                    [integration.id, senderPhone, conversationId]
+                    'UPDATE whatsapp_conversations SET last_activity_at = NOW() WHERE integration_id = $1 AND sender_phone = $2',
+                    [integration.id, senderPhone]
                 );
+
+            } else {
+                // Public Bot session resolution (existing flow)
+                if (mappedRes.rows.length > 0) {
+                    conversationId = mappedRes.rows[0].conversation_id;
+                } else {
+                    // Fallback to finding Organization Admin user id to tie the conversation context
+                    const adminRes = await db.query(
+                        `SELECT u.id FROM users u 
+                         JOIN roles r ON u.role_id = r.id 
+                         WHERE u.organization_id = $1 AND r.name = 'Admin' 
+                         ORDER BY u.created_at ASC LIMIT 1`,
+                        [orgId]
+                    );
+                    const targetUserId = adminRes.rows.length > 0 ? adminRes.rows[0].id : null;
+
+                    const newConv = await db.query(
+                        'INSERT INTO chat_conversations (organization_id, user_id, title) VALUES ($1, $2, $3) RETURNING id',
+                        [orgId, targetUserId, `WhatsApp: ${senderPhone}`]
+                    );
+                    conversationId = newConv.rows[0].id;
+
+                    await db.query(
+                        'INSERT INTO whatsapp_conversations (integration_id, sender_phone, conversation_id) VALUES ($1, $2, $3)',
+                        [integration.id, senderPhone, conversationId]
+                    );
+                }
             }
 
             // Save user incoming query to history
@@ -387,36 +594,116 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
                     schema_info: ctx.schemaInfo, relationships: ctx.relationships
                 },
-                access_policy: { 
-                    role: userContext.role.toLowerCase(), 
-                    allowed_tables: ctx.allowedTables, 
-                    disallowed_tables: ctx.disallowedTables, 
-                    allowed_columns: ctx.allowedColumns, 
-                    restricted_columns: ctx.restrictedColumns || {}, 
+                access_policy: {
+                    role: userContext.role.toLowerCase(),
+                    allowed_tables: ctx.allowedTables,
+                    disallowed_tables: ctx.disallowedTables,
+                    allowed_columns: ctx.allowedColumns,
+                    restricted_columns: ctx.restrictedColumns || {},
                     row_level_filters: {},
-                    max_rows: 1000, 
-                    query_timeout_seconds: 30 
+                    max_rows: 1000,
+                    query_timeout_seconds: 30
                 },
                 question: question,
-                response_format: 'general', 
-                max_rows: 100, 
+                response_format: 'general',
+                max_rows: 100,
                 locale: 'en',
                 include_insights: true,
-                include_visualizations: false
+                include_visualizations: true
             };
 
             const API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
+
+            // --- GREETING SHORTCUT ---
+            // If the user sent a greeting, skip the expensive AI analysis.
+            // Call the suggest API to get schema-aware query suggestions and return immediately.
+            if (isGreeting(question)) {
+                console.log(`👋 [WHATSAPP] Greeting detected: "${question}". Fetching suggestions...`);
+
+                let suggested_queries = [];
+
+                try {
+                    const SUGGEST_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
+                    const suggestPayload = {
+                        ...payload,
+                        original_question: 'What can I ask?',
+                        num_suggestions: 3
+                    };
+                    delete suggestPayload.question;
+                    delete suggestPayload.response_format;
+                    delete suggestPayload.max_rows;
+                    delete suggestPayload.include_insights;
+                    delete suggestPayload.include_visualizations;
+
+                    const suggestResponse = await axios.post(SUGGEST_API_URL, suggestPayload, {
+                        headers: { 'Authorization': `Bearer ${API_KEY}` },
+                        timeout: 10000
+                    });
+
+                    const respData = suggestResponse.data.data || suggestResponse.data;
+                    const rawSuggestions = respData.suggestions || respData.suggested_queries || respData.suggested_questions || [];
+
+                    if (Array.isArray(rawSuggestions)) {
+                        suggested_queries = rawSuggestions.map(s => {
+                            if (typeof s === 'string') return s;
+                            if (typeof s === 'object') return s.question || s.text || s.query || '';
+                            return '';
+                        }).filter(s => s.length > 0);
+                    }
+
+                    console.log(`💡 [WHATSAPP] Greeting: fetched ${suggested_queries.length} schema-aware suggestions (no credit deducted)`);
+
+                } catch (suggestErr) {
+                    // Suggest API failed — use generic fallback
+                    console.warn('⚠️ [WHATSAPP] Greeting suggest API failed, using free fallback:', suggestErr.message);
+                    suggested_queries = [
+                        'Show me the top 5 records',
+                        'What is the total count of entries?',
+                        'Summarize the latest data for me'
+                    ];
+                }
+
+                // Format the WhatsApp message with suggestions
+                let replyText = `👋 *Hello!* I'm your ZeroQueries assistant.\n\nHere are some questions you can ask me about your data:\n`;
+                suggested_queries.forEach((q, index) => {
+                    replyText += `\n${index + 1}. *${q}*`;
+                });
+                replyText += `\n\n_Just reply with any of these questions or type your own query!_`;
+
+                // Save bot response to history
+                const dbMessageContent = `👋 Hello! Here are some suggested queries:\n` + suggested_queries.map((q, i) => `${i + 1}. ${q}`).join('\n');
+                await db.query(
+                    'INSERT INTO chat_messages (conversation_id, role, content) VALUES ($1, $2, $3)',
+                    [conversationId, 'assistant', dbMessageContent]
+                );
+
+                // Deliver response to WhatsApp
+                await whatsappService.sendText(senderPhone, replyText, config);
+
+                // Log successful integration usage
+                await db.query(
+                    `INSERT INTO integration_logs (integration_id, organization_id, endpoint, status, duration_ms, request_payload, response_payload)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [integration.id, orgId, '/api/public/whatsapp/webhook', 'greeting', Date.now() - startedAt,
+                    JSON.stringify({ question }), JSON.stringify({ suggested_queries })]
+                );
+
+                return; // Early return, skipping expensive AI processing and credit deduction!
+            }
+
             const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
 
             // Submit async parsing task to AI engine
             const submitResponse = await axios.post(ASYNC_API_URL, payload, {
-                headers: { 
+                headers: {
                     'accept': 'application/json',
-                    'Authorization': `Bearer ${API_KEY}`, 
-                    'Content-Type': 'application/json' 
+                    'Authorization': `Bearer ${API_KEY}`,
+                    'Content-Type': 'application/json'
                 },
                 timeout: 45000
             });
+
+            console.log('📤 [WHATSAPP WEBHOOK] AI submit task response:', JSON.stringify(submitResponse.data, null, 2));
 
             const taskId = submitResponse.data.task_id;
             if (!taskId) {
@@ -444,8 +731,17 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     const resultResponse = await axios.get(resultUrl, {
                         headers: { 'Authorization': `Bearer ${API_KEY}` }
                     });
-                    
+
                     result = resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data;
+                    console.log('📥 [WHATSAPP WEBHOOK] AI Result Payload received. Saving to zeroqueries-backend/whatsapp_payload.log for debugging...');
+                    try {
+                        fs.writeFileSync(
+                            path.join(__dirname, '../../whatsapp_payload.log'),
+                            JSON.stringify(result, null, 2)
+                        );
+                    } catch (fsErr) {
+                        console.error('⚠️ Failed to write debug payload file:', fsErr.message);
+                    }
                     break;
                 } else if (currentStatus === 'FAILED' || currentStatus === 'CANCELLED') {
                     throw new Error(`AI Task failed with status: ${currentStatus}`);
@@ -516,23 +812,19 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 [conversationId, 'assistant', answerText]
             );
 
-            // 8. Deliver response
+            if (isPrivate) {
+                replyText += `\n📱 _To end this secure session, simply reply with_ *logout* _or_ *exit*.\n`;
+            }
+
+            // 8. Deliver response — enforce WhatsApp's 4096 character hard limit
+            const WA_MAX_CHARS = 4096;
+            if (replyText.length > WA_MAX_CHARS) {
+                const truncateNote = `\n\n_...Message truncated. Full data is in the attached Excel report._`;
+                replyText = replyText.slice(0, WA_MAX_CHARS - truncateNote.length) + truncateNote;
+            }
             await whatsappService.sendText(senderPhone, replyText, config);
 
-            // 9. Generate and deliver Excel spreadsheet report if results contain rows/data
-            if (Array.isArray(queryData) && queryData.length > 0 && Array.isArray(columns) && columns.length > 0) {
-                const excelFilename = generateExcelReport(queryData, columns, orgId);
-                
-                // Construct file URL
-                const hostUrl = process.env.BASE_URL || `http://${req.get('host')}`;
-                const fileUrl = `${hostUrl}/reports/${excelFilename}`;
-                
-                console.log(`📊 [WHATSAPP WEBHOOK] Sending report excel sheet URL: ${fileUrl}`);
-                
-                // Wait for file write and send attachment
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                await whatsappService.sendDocument(senderPhone, fileUrl, 'Query_Result_Report.xlsx', config);
-            }
+
 
             // Log successful integration usage
             await db.query(
@@ -544,7 +836,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
         } catch (err) {
             const errorMsg = err.response?.data || err.message;
             console.error('❌ [WHATSAPP WEBHOOK ERROR]:', errorMsg);
-            
+
             try {
                 fs.appendFileSync(
                     path.join(__dirname, '../../whatsapp_error.log'),
@@ -553,7 +845,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             } catch (fsErr) {
                 console.error('Failed to write local error log:', fsErr);
             }
-            
+
             // Log usage failure
             if (integration) {
                 const orgId = integration.target_organization_id || integration.organization_id;

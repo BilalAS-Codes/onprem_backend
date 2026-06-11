@@ -44,6 +44,21 @@ router.post('/', authenticateToken, isAdmin, async (req, res) => {
 
     try {
         if (id) {
+            // Enforce immutability constraint: once a chatbot is created, there is no option to change it from public to private (or vice versa)
+            if (integration_type === 'whatsapp_bot') {
+                const existingRes = await db.query(
+                    'SELECT config FROM integrations WHERE id = $1 AND organization_id = $2',
+                    [id, organization_id]
+                );
+                if (existingRes.rows.length > 0) {
+                    const oldConfig = existingRes.rows[0].config || {};
+                    const newConfig = config || {};
+                    if (oldConfig.chat_type && newConfig.chat_type && oldConfig.chat_type !== newConfig.chat_type) {
+                        return res.status(400).json({ error: 'Chatbot type (public/private) cannot be modified after creation.' });
+                    }
+                }
+            }
+
             // Update existing
             const result = await db.query(
                 `UPDATE integrations 
@@ -184,6 +199,87 @@ router.delete('/:id', authenticateToken, isAdmin, async (req, res) => {
     } catch (err) {
         console.error('Error deleting integration:', err);
         res.status(500).json({ error: 'Failed to delete integration' });
+    }
+});
+
+/**
+ * GET /api/v1/integrations/:id/authorized-numbers
+ * Fetch authorized mobile numbers for a specific WhatsApp integration (Admin only)
+ */
+router.get('/:id/authorized-numbers', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT wan.*, u.full_name as user_name, u.email as user_email
+             FROM whatsapp_authorized_numbers wan
+             JOIN users u ON wan.user_id = u.id
+             WHERE wan.integration_id = $1
+             ORDER BY wan.created_at DESC`,
+            [req.params.id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Error fetching authorized numbers:', err);
+        res.status(500).json({ error: 'Failed to fetch authorized numbers' });
+    }
+});
+
+/**
+ * POST /api/v1/integrations/:id/authorized-numbers
+ * Add an authorized mobile number linked to a user (Admin only)
+ */
+router.post('/:id/authorized-numbers', authenticateToken, isAdmin, async (req, res) => {
+    const { mobile_number, user_id } = req.body;
+    const integration_id = req.params.id;
+
+    if (!mobile_number || !user_id) {
+        return res.status(400).json({ error: 'Mobile number and user are required' });
+    }
+
+    try {
+        // Clean mobile number (strip spaces, keep only numbers and plus sign)
+        const cleanNumber = String(mobile_number).trim().replace(/[^\+0-9]/g, '');
+
+        const result = await db.query(
+            `INSERT INTO whatsapp_authorized_numbers (integration_id, mobile_number, user_id)
+             VALUES ($1, $2, $3)
+             RETURNING *`,
+            [integration_id, cleanNumber, user_id]
+        );
+
+        // Fetch user info to return complete details to UI
+        const userRes = await db.query(
+            'SELECT full_name as user_name, email as user_email FROM users WHERE id = $1',
+            [user_id]
+        );
+
+        res.status(201).json({
+            ...result.rows[0],
+            user_name: userRes.rows[0]?.user_name,
+            user_email: userRes.rows[0]?.user_email
+        });
+    } catch (err) {
+        console.error('Error adding authorized number:', err);
+        if (err.code === '23505') { // Unique constraint violation
+            return res.status(400).json({ error: 'This mobile number is already authorized for this bot.' });
+        }
+        res.status(500).json({ error: 'Failed to add authorized number' });
+    }
+});
+
+/**
+ * DELETE /api/v1/integrations/:id/authorized-numbers/:authId
+ * Delete an authorized mobile number (Admin only)
+ */
+router.delete('/:id/authorized-numbers/:authId', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        await db.query(
+            'DELETE FROM whatsapp_authorized_numbers WHERE id = $1 AND integration_id = $2',
+            [req.params.authId, req.params.id]
+        );
+        res.json({ success: true, message: 'Authorized number removed' });
+    } catch (err) {
+        console.error('Error deleting authorized number:', err);
+        res.status(500).json({ error: 'Failed to remove authorized number' });
     }
 });
 
