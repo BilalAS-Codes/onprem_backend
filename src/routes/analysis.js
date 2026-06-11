@@ -721,7 +721,7 @@ router.post('/analyze', authenticateToken, async (req, res) => {
 
         console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
         console.log('📦 DASHBOARD_PAYLOAD:', JSON.stringify(externalPayload));
-        
+
         const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze';
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
