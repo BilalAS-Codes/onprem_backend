@@ -47,7 +47,7 @@ class AdminDashboardController {
           password: databaseConnection.password,
           ssl_enabled: databaseConnection.ssl_enabled
         });
-        
+
         if (testResult.success) {
           databaseConnection.latency_ms = testResult.latency_ms;
         }
@@ -69,9 +69,9 @@ class AdminDashboardController {
 
     } catch (error) {
       console.error('Error in admin dashboard:', error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: 'Failed to fetch dashboard data',
-        details: error.message 
+        details: error.message
       });
     }
   }
@@ -117,7 +117,7 @@ class AdminDashboardController {
        FROM current_quota cq`,
       [organizationId]
     );
-    
+
     return query.rows[0] || {
       total_queries_limit: 0,
       queries_used: 0,
@@ -134,7 +134,7 @@ class AdminDashboardController {
 
   async getDatabaseConnection(organizationId) {
     const query = await db.query(
-       `SELECT id, db_type, host, port, database_name, username, 
+      `SELECT id, db_type, host, port, database_name, username, 
               ssl_enabled, status, latency_ms, last_synced_at,
               (SELECT COUNT(*) FROM semantic_tables WHERE connection_id = dc.id) as tables_count
        FROM database_connections dc
@@ -143,7 +143,7 @@ class AdminDashboardController {
        LIMIT 1`,
       [organizationId]
     );
-    
+
     return query.rows[0] || null;
   }
 
@@ -223,7 +223,7 @@ class AdminDashboardController {
 
   async getQueryAnalytics(organizationId, range) {
     const dateFilter = this.getDateFilter(range);
-    
+
     // Daily queries
     const dailyQueries = await db.query(
       `SELECT 
@@ -361,22 +361,22 @@ class AdminDashboardController {
     const currentPlanRow = currentPlan.rows[0] || null;
     const enrichedCurrentPlan = currentPlanRow
       ? enrichPlanRecord({
-          ...currentPlanRow,
-          name: currentPlanRow.name
-        })
+        ...currentPlanRow,
+        name: currentPlanRow.name
+      })
       : null;
 
     return {
       current_plan: enrichedCurrentPlan
         ? {
-            ...currentPlanRow,
-            name: enrichedCurrentPlan.name,
-            price: resolvePlanPrice(enrichedCurrentPlan),
-            price_label: enrichedCurrentPlan.price_label || null,
-            price_label_ar: enrichedCurrentPlan.price_label_ar || null,
-            feature_list: enrichedCurrentPlan.feature_list || [],
-            feature_list_ar: enrichedCurrentPlan.feature_list_ar || []
-          }
+          ...currentPlanRow,
+          name: enrichedCurrentPlan.name,
+          price: resolvePlanPrice(enrichedCurrentPlan),
+          price_label: enrichedCurrentPlan.price_label || null,
+          price_label_ar: enrichedCurrentPlan.price_label_ar || null,
+          feature_list: enrichedCurrentPlan.feature_list || [],
+          feature_list_ar: enrichedCurrentPlan.feature_list_ar || []
+        }
         : null,
       invoices: invoices.rows,
       payment_method: paymentMethod.rows[0] || { type: 'card', last4: '****', expiry_date: null, is_default: true }
@@ -494,7 +494,7 @@ class AdminDashboardController {
 
   async getPerformanceMetrics(organizationId, range) {
     const dateFilter = this.getDateFilter(range);
-    
+
     const query = await db.query(
       `SELECT 
          ROUND(AVG(execution_time_ms)) as avg_response_time,
@@ -537,7 +537,7 @@ class AdminDashboardController {
       const total = quotaAlert.rows[0].assigned_queries_limit;
       const used = total - remaining;
       const percentage = (used / total) * 100;
-      
+
       if (percentage > 90) {
         alerts.push({
           id: 'quota_critical',
@@ -603,7 +603,7 @@ class AdminDashboardController {
   }
 
   getDateFilter(range) {
-    switch(range) {
+    switch (range) {
       case 'week':
         return `AND created_at >= NOW() - INTERVAL '7 days'`;
       case 'month':
@@ -616,7 +616,7 @@ class AdminDashboardController {
   }
 
   getDateFilterForJoin(range) {
-    switch(range) {
+    switch (range) {
       case 'week':
         return `>= NOW() - INTERVAL '7 days'`;
       case 'month':

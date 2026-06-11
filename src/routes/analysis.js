@@ -8,6 +8,7 @@ const creditService = require('../services/creditService');
 const jwt = require('jsonwebtoken');
 const { jwtConfig } = require('../config/jwt');
 const dbDiscoverer = require('../helpers/dbDiscoverer');
+const { getAiBaseUrl, adjustPayload, areSuggestionsEnabled, getDisabledSuggestionsResponse, normalizeResponse, writeAsyncDebugLog } = require('../helpers/aiHelper');
 
 // In-memory storage for Server-Sent Events clients keyed by conversation ID
 const sseClients = {};
@@ -719,13 +720,14 @@ router.post('/analyze', authenticateToken, async (req, res) => {
             schemaContext
         });
 
-        console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
-        console.log('📦 DASHBOARD_PAYLOAD:', JSON.stringify(externalPayload));
+        const adjustedPayload = adjustPayload(externalPayload);
 
-        const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze';
+        console.log('🔍 [ANALYZE] Forwarding request to External Analysis API...');
+
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/analyze`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
-        const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
+        const response = await axios.post(EXTERNAL_API_URL, adjustedPayload, {
 
             headers: {
                 'accept': 'application/json',
@@ -735,23 +737,31 @@ router.post('/analyze', authenticateToken, async (req, res) => {
             timeout: 45000 // 45s timeout for AI analysis
         });
 
+        const finalResult = normalizeResponse(response.data);
+
+        console.log('=== DEBUG ANALYZE RESPONSE ===');
+        console.log('AI insights toggle enabled:', process.env.AI_INSIGHTS_ENABLED);
+        console.log('Raw response insights:', response.data?.insights || response.data?.ai_result?.insights);
+        console.log('Final normalized response insights:', finalResult?.insights || finalResult?.ai_result?.insights);
+        console.log('==============================');
+
         // 5. Return the result from the external API to our frontend
         console.log('✅ [ANALYZE] Returning analysis results to frontend');
-        logExternalApiResponse('📥 [ANALYZE] External Analysis API response:', response.data);
+        logExternalApiResponse('📥 [ANALYZE] External Analysis API response:', finalResult);
 
         await logAnalysisApiCall({
             organizationId: organization_id,
             userId: user_id,
             endpoint: '/api/v1/analyze',
             question,
-            requestPayload: externalPayload,
-            responsePayload: response.data,
+            requestPayload: adjustedPayload,
+            responsePayload: finalResult,
             statusCode: response.status,
             durationMs: Date.now() - startedAt,
             success: true
         });
 
-        res.json(response.data);
+        res.json(finalResult);
 
     } catch (error) {
         console.error('❌ [ANALYZE] Analysis Proxy Error:', error.response?.data || error.message);
@@ -784,6 +794,10 @@ router.post('/analyze', authenticateToken, async (req, res) => {
  * Proxies the request to the external AI service to get query suggestions
  */
 router.post('/suggest-queries', authenticateToken, async (req, res) => {
+    if (!areSuggestionsEnabled()) {
+        return res.json(getDisabledSuggestionsResponse());
+    }
+
     const { original_question, num_suggestions = 3, locale = 'en' } = req.body;
     const { organization_id, role } = req.user;
 
@@ -830,7 +844,7 @@ router.post('/suggest-queries', authenticateToken, async (req, res) => {
         console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
 
         // 4. Call External Digital Ocean API for suggestions
-        const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/suggest-queries';
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/suggest-queries`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
@@ -934,16 +948,18 @@ router.post('/webhook', async (req, res) => {
         clearInterval(taskPollers.get(normalizedUpdate.task_id));
         taskPollers.delete(normalizedUpdate.task_id);
     }
+    const finalUpdate = normalizeResponse(normalizedUpdate);
+    writeAsyncDebugLog('WEBHOOK_PAYLOAD', finalUpdate);
     await updateAnalysisApiLogByTaskId({
-        taskId: normalizedUpdate.task_id || normalizedUpdate.result?.request_id || normalizedUpdate.details?.result?.request_id,
-        responsePayload: normalizedUpdate,
-        errorPayload: normalizedStatus === 'FAILED' ? normalizedUpdate : null,
+        taskId: finalUpdate.task_id || finalUpdate.result?.request_id || finalUpdate.details?.result?.request_id,
+        responsePayload: finalUpdate,
+        errorPayload: normalizedStatus === 'FAILED' ? finalUpdate : null,
         success: normalizedStatus === 'COMPLETED',
         conversationId: convId || null
     });
     // broadcast event
     if (convId) {
-        sendSse(convId, 'task_update', normalizedUpdate);
+        sendSse(convId, 'task_update', finalUpdate);
         // persist small status message if provided
         try {
             if (normalizedUpdate.message) {
@@ -1002,23 +1018,56 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             schemaContext
         });
 
+        const adjustedPayload = adjustPayload(externalPayload);
+
         // build webhook URL with conversation_id query param
         const webhookUrl = `${req.protocol}://${req.get('host')}/api/v1/webhook?conversation_id=${encodeURIComponent(conversation_id)}`;
 
         console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', 'webhookUrl=', webhookUrl);
-        console.dir(redactPayloadForLog(externalPayload), { depth: null, maxArrayLength: null });
-        const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
-        const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
+        console.dir(redactPayloadForLog(adjustedPayload), { depth: null, maxArrayLength: null });
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/analyze-async`;
+        const API_KEY = process.env.EXTERNAL_AI_API_KEY;
 
-        const response = await axios.post(`${EXTERNAL_API_URL}?webhook_url=${encodeURIComponent(webhookUrl)}`, externalPayload, {
+        console.log(API_KEY, 'api key')
+        console.log(EXTERNAL_API_URL, 'EXTRERNAL API')
+
+        const fs = require('fs');
+        const path = require('path');
+        const debugFilePath = path.join(__dirname, '../../analyze_async_debug.txt');
+        try {
+            fs.appendFileSync(
+                debugFilePath,
+                JSON.stringify(adjustedPayload, null, 2) + '\n--------------------------------------------\n',
+                'utf8'
+            );
+        } catch (logErr) {
+            console.error('Failed to log request payload to analyze_async_debug.txt:', logErr.message);
+        }
+
+        const response = await axios.post(`${EXTERNAL_API_URL}?webhook_url=${encodeURIComponent(webhookUrl)}`, adjustedPayload, {
             headers: {
                 'accept': 'application/json',
                 'Authorization': `Bearer ${API_KEY}`,
+                'x-api-key': API_KEY,
                 'Content-Type': 'application/json'
             },
             timeout: 45000
         });
+
+        console.log(response, 'external api response')
         logExternalApiResponse('📥 [ASYNC ANALYZE] External Analysis API response:', response.data);
+
+        try {
+            fs.appendFileSync(
+                debugFilePath,
+                JSON.stringify(response.data, null, 2) + '\n\n',
+                'utf8'
+            );
+        } catch (logErr) {
+            console.error('Failed to log response to analyze_async_debug.txt:', logErr.message);
+        }
+
+        writeAsyncDebugLog('ANALYZE_ASYNC_SUBMIT_RESPONSE', response.data);
 
         await logAnalysisApiCall({
             organizationId: organization_id,
@@ -1026,7 +1075,7 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             conversationId: conversation_id,
             endpoint: '/api/v1/analyze-async',
             question,
-            requestPayload: externalPayload,
+            requestPayload: adjustedPayload,
             responsePayload: response.data,
             statusCode: response.status,
             durationMs: Date.now() - startedAt,
@@ -1058,9 +1107,24 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             pollTaskStatus(returnedTaskId, conversation_id);
         }
     } catch (error) {
+        console.log(error.response, 'error')
+        console.log(error.message, 'error message')
         console.error(' [ASYNC ANALYZE] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
         const errorData = error.response?.data || { error: 'External analysis service failed' };
+
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const debugFilePath = path.join(__dirname, '../../analyze_async_debug.txt');
+            fs.appendFileSync(
+                debugFilePath,
+                JSON.stringify(errorData, null, 2) + '\n\n',
+                'utf8'
+            );
+        } catch (logErr) {
+            console.error('Failed to log error response to analyze_async_debug.txt:', logErr.message);
+        }
 
         await logAnalysisApiCall({
             organizationId: organization_id,
@@ -1171,7 +1235,7 @@ router.post('/export-async', authenticateToken, checkCredits, async (req, res) =
             }
         });
 
-        const EXTERNAL_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export';
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/export`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.post(EXTERNAL_API_URL, externalPayload, {
@@ -1229,12 +1293,13 @@ router.post('/export-webhook', async (req, res) => {
 router.get('/export/:exportId/status', authenticateToken, async (req, res) => {
     const { exportId } = req.params;
     try {
-        const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export/${exportId}/status`;
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/export/${exportId}/status`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 accept: 'application/json',
-                Authorization: `Bearer ${API_KEY}`
+                Authorization: `Bearer ${API_KEY}`,
+                'x-api-key': API_KEY
             }
         });
         res.json(response.data);
@@ -1257,12 +1322,13 @@ router.get('/export/:exportId/status', authenticateToken, async (req, res) => {
 router.get('/export/:exportId/download', authenticateToken, async (req, res) => {
     const { exportId } = req.params;
     try {
-        const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/export/${exportId}/download`;
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/export/${exportId}/download`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 accept: 'application/octet-stream',
-                Authorization: `Bearer ${API_KEY}`
+                Authorization: `Bearer ${API_KEY}`,
+                'x-api-key': API_KEY
             },
             responseType: 'stream'
         });
@@ -1293,18 +1359,19 @@ router.get('/task/:taskId/status', authenticateToken, async (req, res) => {
     console.log('📨 [TASK STATUS] Fetching status for', taskId);
 
     try {
-        const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/task/${taskId}/status`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
 
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 'accept': 'application/json',
-                'Authorization': `Bearer ${API_KEY}`
+                'Authorization': `Bearer ${API_KEY}`,
+                'x-api-key': API_KEY
             }
         });
 
         logExternalApiResponse(`📥 [TASK STATUS] External API response for ${taskId}:`, response.data);
-        res.json(response.data);
+        res.json(normalizeResponse(response.data));
     } catch (error) {
         console.error(' [TASK STATUS] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
@@ -1323,18 +1390,20 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
 
     try {
         await delay(1);
-        const EXTERNAL_API_URL = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
+        const EXTERNAL_API_URL = `${getAiBaseUrl()}/task/${taskId}/result`;
         const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
+        //                    'x-api-key': API_KEY
 
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
                 'accept': 'application/json',
-                'Authorization': `Bearer ${API_KEY}`
+                'Authorization': `Bearer ${API_KEY}`,
+                'x-api-key': API_KEY
             }
         });
 
         logExternalApiResponse(`📥 [TASK RESULT] External API response for ${taskId}:`, response.data);
-        res.json(response.data);
+        res.json(normalizeResponse(response.data));
     } catch (error) {
         console.error('[TASK RESULT] Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
@@ -1352,17 +1421,20 @@ router.get('/task/:taskId/result', authenticateToken, async (req, res) => {
 async function pollTaskStatus(taskId, conversationId) {
     console.log('🔁 Starting poll for task', taskId);
     const API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
-    const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+    const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
+    console.log(statusUrl, 'statusUrl')
     if (taskPollers.has(taskId)) {
         clearInterval(taskPollers.get(taskId));
         taskPollers.delete(taskId);
     }
     const interval = setInterval(async () => {
         try {
+            //                    'x-api-key': API_KEY
             const resp = await axios.get(statusUrl, {
                 headers: {
                     accept: 'application/json',
-                    Authorization: `Bearer ${API_KEY}`
+                    Authorization: `Bearer ${API_KEY}`,
+                    'x-api-key': API_KEY
                 }
             });
             const data = resp.data;
@@ -1371,10 +1443,12 @@ async function pollTaskStatus(taskId, conversationId) {
             const status = data.status ?? data.data?.status;
             const normalizedStatus = String(status || '').toUpperCase();
             console.log('🔁 poll status', status);
+            const taskUpdate = normalizeResponse(normalizeTaskUpdatePayload(data, taskId, conversationId));
+            writeAsyncDebugLog('POLL_TASK_UPDATE', taskUpdate);
             await updateAnalysisApiLogByTaskId({
                 taskId,
-                responsePayload: normalizeTaskUpdatePayload(data, taskId, conversationId),
-                errorPayload: normalizedStatus === 'FAILED' ? normalizeTaskUpdatePayload(data, taskId, conversationId) : null,
+                responsePayload: taskUpdate,
+                errorPayload: normalizedStatus === 'FAILED' ? taskUpdate : null,
                 success: normalizedStatus === 'COMPLETED',
                 conversationId
             });
@@ -1382,7 +1456,7 @@ async function pollTaskStatus(taskId, conversationId) {
             sendSse(
                 conversationId,
                 'task_update',
-                normalizeTaskUpdatePayload(data, taskId, conversationId)
+                taskUpdate
             );
             if (normalizedStatus === 'COMPLETED' || normalizedStatus === 'FAILED') {
                 clearInterval(interval);

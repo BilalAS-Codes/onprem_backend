@@ -7,6 +7,7 @@ const XLSX = require('xlsx');
 const db = require('../config/database');
 const creditService = require('../services/creditService');
 const whatsappService = require('../services/whatsappService');
+const { getAiBaseUrl, adjustPayload, normalizeResponse } = require('../helpers/aiHelper');
 const chartService = require('../services/chartService');
 
 // --- HELPER FUNCTIONS FOR CONTEXT BUILDING (Synced from publicChat.js) ---
@@ -612,6 +613,8 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 include_visualizations: true
             };
 
+            const adjustedPayload = adjustPayload(payload);
+
             const API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
 
             // --- GREETING SHORTCUT ---
@@ -719,7 +722,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 attempts++;
                 await new Promise(resolve => setTimeout(resolve, 2000));
 
-                const statusUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/status`;
+                const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
                 const statusResponse = await axios.get(statusUrl, {
                     headers: { 'Authorization': `Bearer ${API_KEY}` }
                 });
@@ -727,7 +730,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 const currentStatus = statusResponse.data.data?.status || 'UNKNOWN';
 
                 if (currentStatus === 'COMPLETED') {
-                    const resultUrl = `https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/task/${taskId}/result`;
+                    const resultUrl = `${getAiBaseUrl()}/task/${taskId}/result`;
                     const resultResponse = await axios.get(resultUrl, {
                         headers: { 'Authorization': `Bearer ${API_KEY}` }
                     });
