@@ -203,6 +203,24 @@ function generateExcelReport(dataRows, columns, orgId) {
     return filename;
 }
 
+// Generate an Excel sheet from tabular query results
+function generateExcelReport(dataRows, columns, orgId) {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(dataRows, { header: columns });
+    XLSX.utils.book_append_sheet(wb, ws, "Query Results");
+
+    const reportsDir = path.join(__dirname, '..', '..', 'public', 'reports');
+    if (!fs.existsSync(reportsDir)) {
+        fs.mkdirSync(reportsDir, { recursive: true });
+    }
+
+    const filename = `Report_${orgId}_${Date.now()}.xlsx`;
+    const filepath = path.join(reportsDir, filename);
+    XLSX.writeFile(wb, filepath);
+
+    return filename;
+}
+
 // --- GREETING DETECTION ---
 
 /**
@@ -827,7 +845,37 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             }
             await whatsappService.sendText(senderPhone, replyText, config);
 
+            // --- CHART IMAGE DELIVERY ---
+            const visualizations = result.ai_result?.visualizations || result.visualizations || [];
+            if (visualizations.length > 0 && visualizations[0].plotly_json) {
+                try {
+                    const imageUrl = await chartService.generateChartImageUrl(visualizations[0].plotly_json);
+                    if (imageUrl) {
+                        await whatsappService.sendImage(senderPhone, imageUrl, config);
+                    }
+                } catch (chartErr) {
+                    console.error('⚠️ [WHATSAPP WEBHOOK] Failed to send chart image:', chartErr.message);
+                }
+            }
 
+            // --- EXCEL REPORT DELIVERY ---
+            if (Array.isArray(queryData) && queryData.length > 0 && Array.isArray(columns) && columns.length > 0) {
+                try {
+                    const excelFilename = generateExcelReport(queryData, columns, orgId);
+
+                    // Construct file URL
+                    const hostUrl = process.env.BASE_URL || `http://${req.get('host')}`;
+                    const fileUrl = `${hostUrl}/reports/${excelFilename}`;
+
+                    console.log(`📊 [WHATSAPP WEBHOOK] Sending report excel sheet URL: ${fileUrl}`);
+
+                    // Wait for file write and send attachment
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    await whatsappService.sendDocument(senderPhone, fileUrl, 'Query_Result_Report.xlsx', config);
+                } catch (excelErr) {
+                    console.error('⚠️ [WHATSAPP WEBHOOK] Failed to generate/send Excel report:', excelErr.message);
+                }
+            }
 
             // Log successful integration usage
             await db.query(
@@ -861,10 +909,16 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
 
             // Notify user of exception
             if (config) {
-                await whatsappService.sendText(senderPhone, '⚠️ I encountered an error processing your query. Please check your data or try rephrasing.', config);
+                try {
+                    await whatsappService.sendText(senderPhone, '⚠️ I encountered an error processing your query. Please check your data or try rephrasing.', config);
+                } catch (notifyErr) {
+                    console.error('⚠️ Could not send error message to WhatsApp (API token may be invalid/expired):', notifyErr.message);
+                }
             }
         }
-    })();
+    })().catch(err => {
+        console.error('💥 Unhandled error in WhatsApp Webhook IIFE:', err.message);
+    });
 });
 
 module.exports = router;

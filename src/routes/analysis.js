@@ -109,18 +109,49 @@ function sendSse(conversationId, event, data) {
 }
 
 function normalizeTaskUpdatePayload(payload, fallbackTaskId = null, fallbackConversationId = null) {
-    const base = payload?.success && payload?.data ? payload.data : payload;
-    const details = base?.details || payload?.details;
-    const result = base?.result || details?.result || payload?.result || payload?.data?.result;
+    if (!payload) return payload;
 
-    return {
+    const base = payload.success && payload.data ? payload.data : payload;
+
+    // Check if the base payload itself is the raw completed result (e.g. on-premises response)
+    const isRawResult = !!(base.request_id && base.data);
+
+    let status = base.status || payload.status;
+    if (!status && isRawResult) {
+        status = 'COMPLETED';
+    } else if (status) {
+        status = String(status).toUpperCase(); // Normalize to uppercase (e.g. COMPLETED)
+    }
+
+    const resolvedTaskId = base.task_id || payload.task_id || payload.data?.task_id || base.request_id || fallbackTaskId;
+    const resolvedConversationId = base.conversation_id || payload.conversation_id || fallbackConversationId;
+
+    let result = base.result || base.details?.result || payload.result || payload.data?.result;
+    if (!result && isRawResult) {
+        result = base;
+    }
+
+    let details = base.details || payload.details;
+    if (result) {
+        details = { ...(details || {}), result };
+    }
+
+    const normalized = {
         ...payload,
-        ...(base && base !== payload ? base : {}),
-        task_id: base?.task_id || payload?.task_id || payload?.data?.task_id || fallbackTaskId,
-        conversation_id: base?.conversation_id || payload?.conversation_id || fallbackConversationId,
-        details: result && details ? { ...details, result } : details,
-        result: result || undefined
+        ...(base !== payload ? base : {}),
+        status,
+        task_id: resolvedTaskId,
+        conversation_id: resolvedConversationId,
+        details,
+        result
     };
+
+    if (isRawResult) {
+        normalized.percentage = 100;
+        normalized.message = normalized.message || "Analysis completed successfully!";
+    }
+
+    return normalized;
 }
 
 function delay(ms) {
@@ -1018,9 +1049,9 @@ router.post('/analyze-async', authenticateToken, checkCredits, async (req, res) 
             schemaContext
         });
 
+
         const adjustedPayload = adjustPayload(externalPayload);
 
-        // build webhook URL with conversation_id query param
         const webhookUrl = `${req.protocol}://${req.get('host')}/api/v1/webhook?conversation_id=${encodeURIComponent(conversation_id)}`;
 
         console.log('🔍 [ASYNC ANALYZE] Forwarding request to External Analysis API...', 'webhookUrl=', webhookUrl);
@@ -1439,11 +1470,11 @@ async function pollTaskStatus(taskId, conversationId) {
             });
             const data = resp.data;
             console.log('🔁 poll response', data);
-            // some versions wrap under { success,data: {...} }
-            const status = data.status ?? data.data?.status;
-            const normalizedStatus = String(status || '').toUpperCase();
-            console.log('🔁 poll status', status);
+
             const taskUpdate = normalizeResponse(normalizeTaskUpdatePayload(data, taskId, conversationId));
+            const normalizedStatus = String(taskUpdate.status || '').toUpperCase();
+            console.log('🔁 poll status', normalizedStatus);
+
             writeAsyncDebugLog('POLL_TASK_UPDATE', taskUpdate);
             await updateAnalysisApiLogByTaskId({
                 taskId,
