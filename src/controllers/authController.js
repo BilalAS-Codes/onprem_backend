@@ -270,20 +270,26 @@ const authController = {
 
   async changePassword(req, res) {
     try {
-      const { currentPassword, newPassword } = req.body;
+      const { currentPassword, newPassword, current_password, new_password } = req.body;
+      const actualCurrentPassword = currentPassword || current_password;
+      const actualNewPassword = newPassword || new_password;
       const userId = req.user.id;
+
+      if (!actualCurrentPassword || !actualNewPassword) {
+        return res.status(400).json({ error: 'Current password and new password are required' });
+      }
 
       const user = await User.findByEmail(req.user.email);
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      const isValidPassword = await User.verifyPassword(currentPassword, user.password_hash);
+      const isValidPassword = await User.verifyPassword(actualCurrentPassword, user.password_hash);
       if (!isValidPassword) {
         return res.status(400).json({ error: 'Current password is incorrect' });
       }
 
-      await User.update(userId, { password: newPassword });
+      await User.update(userId, { password: actualNewPassword });
 
       return res.json({
         success: true,

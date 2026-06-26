@@ -158,60 +158,37 @@ router.post('/chat', authenticateApiKey, async (req, res) => {
         const ctx = await buildSemanticContext(conn, req.user);
 
         // 4. Construct AI Payload
+        const access_policy = {
+            role: role.toLowerCase(),
+            allowed_tables: ctx.allowedTables,
+            disallowed_tables: ctx.disallowedTables,
+            allowed_columns: ctx.allowedColumns,
+            restricted_columns: ctx.restrictedColumns || {},
+            row_level_filters: {},
+            max_rows: 1000,
+            query_timeout_seconds: 30
+        };
+
         const payload = {
-            db_config: isFileSource ? {
-                type: 'sheets',
-                aws_paths: (await db.query('SELECT s3_key FROM file_sources WHERE organization_id = $1 AND status = $2', [organization_id, 'active'])).rows.map(f => `s3://${process.env.AWS_S3_BUCKET || 'zeroqueries'}/${f.s3_key}`),
-                load_all_sheets: true, schema_info: ctx.schemaInfo, relationships: ctx.relationships
-            } : {
-                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                connection_string: constructConnectionString(conn),
-                host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
-                schema_info: ctx.schemaInfo, relationships: ctx.relationships
-            },
-            access_policy: {
-                role: role.toLowerCase(),
-                allowed_tables: ctx.allowedTables,
-                disallowed_tables: ctx.disallowedTables,
-                allowed_columns: ctx.allowedColumns,
-                restricted_columns: ctx.restrictedColumns || {},
-                row_level_filters: {},
-                max_rows: 1000,
-                query_timeout_seconds: 30
-            },
             question: message,
-            response_format: 'general',
             max_rows: 100,
-            locale: 'en',
             include_insights: true,
-            include_visualizations: false // Visualizations are usually for the widget/dashboard
+            include_visualizations: false,
+            access_policy,
+            locale: 'en',
+            strict_joins: true
         };
         const adjustedPayload = adjustPayload(payload);
 
         const AI_API_KEY = (process.env.EXTERNAL_AI_API_KEY || '').replace(/"/g, '').trim();
-        const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
+        const QUERY_API_URL = `${getAiBaseUrl()}/query`;
 
-        const submitResponse = await axios.post(ASYNC_API_URL, adjustedPayload, {
+        const queryResponse = await axios.post(QUERY_API_URL, adjustedPayload, {
             headers: { 'Authorization': `Bearer ${AI_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 45000
+            timeout: 60000
         });
 
-        const taskId = submitResponse.data.task_id;
-        let result = null;
-        let attempts = 0;
-        while (attempts < 45) {
-            attempts++;
-            await new Promise(r => setTimeout(r, 2000));
-            const statusRes = await axios.get(`${getAiBaseUrl()}/task/${taskId}/status`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
-            const currentStatus = statusRes.data.data?.status;
-            if (currentStatus === 'COMPLETED') {
-                const resRes = await axios.get(`${getAiBaseUrl()}/task/${taskId}/result`, { headers: { 'Authorization': `Bearer ${AI_API_KEY}` } });
-                result = normalizeResponse(resRes.data.data?.result || resRes.data.data || resRes.data);
-                break;
-            } else if (['FAILED', 'CANCELLED'].includes(currentStatus)) throw new Error('AI analysis failed');
-        }
-
-        if (!result) throw new Error('AI analysis timed out');
+        const result = normalizeResponse(queryResponse.data);
 
         // 5. Finalize
         await creditService.deductCredits(organization_id, 1, { reference_type: 'developer_api', integration_id: req.integration.id });
@@ -223,7 +200,6 @@ router.post('/chat', authenticateApiKey, async (req, res) => {
             data: result.data || [],
             ai_result: result,
             metadata: {
-                task_id: taskId,
                 duration_ms: Date.now() - startedAt
             }
         });

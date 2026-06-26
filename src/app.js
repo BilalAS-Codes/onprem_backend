@@ -7,19 +7,19 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger');
 
 // Import routes
-const authRoutes       = require('./routes/auth');
-const adminRoutes      = require('./routes/admin');
+const authRoutes = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
 const organizationRoutes = require('./routes/organizations');
-const userRoutes       = require('./routes/users');
+const userRoutes = require('./routes/users');
 const departmentRoutes = require('./routes/departments');
-const queryRoutes      = require('./routes/queries');
-const auditRoutes      = require('./routes/audit');
-const roleRoutes       = require('./routes/roles');
-const analysisRoutes   = require('./routes/analysis');
-const chatRoutes       = require('./routes/chats');
-const feedbackRoutes     = require('./routes/feedback');
-const publicChatRoutes   = require('./routes/publicChat');
-const whatsappRoutes     = require('./routes/whatsapp');
+const queryRoutes = require('./routes/queries');
+const auditRoutes = require('./routes/audit');
+const roleRoutes = require('./routes/roles');
+const analysisRoutes = require('./routes/analysis');
+const chatRoutes = require('./routes/chats');
+const feedbackRoutes = require('./routes/feedback');
+const publicChatRoutes = require('./routes/publicChat');
+const whatsappRoutes = require('./routes/whatsapp');
 const developerApiRoutes = require('./routes/developerApi');
 
 const app = express();
@@ -43,23 +43,23 @@ app.get('/health', (req, res) => {
 });
 
 // Public Integration Routes (WhatsApp + Chatbot Widget — no auth required)
-app.use('/api/public',          publicChatRoutes);
+app.use('/api/public', publicChatRoutes);
 app.use('/api/public/whatsapp', whatsappRoutes);
 
 // API Routes
-app.use('/api/v1',              analysisRoutes);
-app.use('/api/v1',              developerApiRoutes);
-app.use('/api/v1/chats',        chatRoutes);
-app.use('/api/v1/feedback',     feedbackRoutes);
+app.use('/api/v1', analysisRoutes);
+app.use('/api/v1', developerApiRoutes);
+app.use('/api/v1/chats', chatRoutes);
+app.use('/api/v1/feedback', feedbackRoutes);
 
-app.use('/api/auth',            authRoutes);
-app.use('/api/admin',           adminRoutes);
-app.use('/api/organizations',   organizationRoutes);
-app.use('/api/users',           userRoutes);
-app.use('/api/departments',     departmentRoutes);
-app.use('/api/queries',         queryRoutes);
-app.use('/api/audit',           auditRoutes);
-app.use('/api/roles',           roleRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/organizations', organizationRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/departments', departmentRoutes);
+app.use('/api/queries', queryRoutes);
+app.use('/api/audit', auditRoutes);
+app.use('/api/roles', roleRoutes);
 
 // Swagger Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

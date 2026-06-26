@@ -285,35 +285,27 @@ router.post('/chat', async (req, res) => {
 
         const ctx = await buildSemanticContext(conn, userContext);
 
-        const payload = {
-            db_config: isFileSource ? {
-                type: 'sheets',
-                aws_paths: (await db.query('SELECT s3_key FROM file_sources WHERE organization_id = $1 AND status = $2', [orgId, 'active'])).rows.map(f => `s3://${process.env.AWS_S3_BUCKET || 'zeroqueries'}/${f.s3_key}`),
-                load_all_sheets: true, schema_info: ctx.schemaInfo, relationships: ctx.relationships
-            } : {
-                type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                connection_string: constructConnectionString(conn),
-                host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
-                schema_info: ctx.schemaInfo, relationships: ctx.relationships
-            },
-            access_policy: {
-                role: userContext.role.toLowerCase(),
-                allowed_tables: ctx.allowedTables,
-                disallowed_tables: ctx.disallowedTables,
-                allowed_columns: ctx.allowedColumns,
-                restricted_columns: ctx.restrictedColumns || {},
-                row_level_filters: {},
-                max_rows: 1000,
-                query_timeout_seconds: 30
-            },
-            question: question,
-            response_format: 'general',
-            max_rows: 100,
-            locale: 'en',
-            include_insights: true,
-            include_visualizations: true
+        const access_policy = {
+            role: userContext.role.toLowerCase(),
+            allowed_tables: ctx.allowedTables,
+            disallowed_tables: ctx.disallowedTables,
+            allowed_columns: ctx.allowedColumns,
+            restricted_columns: ctx.restrictedColumns || {},
+            row_level_filters: {},
+            max_rows: 1000,
+            query_timeout_seconds: 30
         };
-      
+
+        const payload = {
+            question: question,
+            max_rows: 100,
+            include_insights: true,
+            include_visualizations: true,
+            access_policy,
+            locale: 'en',
+            strict_joins: true
+        };
+       
         const adjustedPayload = adjustPayload(payload);
 
         // 3. TARGET THE ASYNC ENDPOINT
@@ -420,119 +412,24 @@ router.post('/chat', async (req, res) => {
         }
         // --- END GREETING SHORTCUT ---
 
-        // 3. TARGET THE ASYNC ENDPOINT
-        const ASYNC_API_URL = `${getAiBaseUrl()}/analyze-async`;
-//         const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
+        // 3. CALL THE NEW AI MODEL /query ENDPOINT
+        const QUERY_API_URL = `${getAiBaseUrl()}/query`;
 
-        console.log(`🚀 [PUBLIC CHAT] Submitting Async Task to: ${ASYNC_API_URL}`);
+        console.log(`🚀 [PUBLIC CHAT] Sending request to: ${QUERY_API_URL}`);
         console.log('📦 [PUBLIC CHAT] Payload:', JSON.stringify(adjustedPayload, null, 2));
 
-        const submitResponse = await axios.post(ASYNC_API_URL, adjustedPayload, {
+        const queryResponse = await axios.post(QUERY_API_URL, adjustedPayload, {
             headers: {
                 'accept': 'application/json',
                 'Authorization': `Bearer ${API_KEY}`,
                 'Content-Type': 'application/json'
             },
-            timeout: 45000
+            timeout: 60000
         });
 
-        const taskId = submitResponse.data.task_id;
-        if (!taskId) {
-            throw new Error('No task_id returned from AI service');
-        }
+        const result = normalizeResponse(queryResponse.data);
 
-        console.log(`⏳ [PUBLIC CHAT] Task Created: ${taskId}. Polling for results...`);
-
-        // 4. POLLING LOOP (Wait for the AI to finish)
-        let result = null;
-        let attempts = 0;
-        const MAX_ATTEMPTS = 45; // 90 seconds total (2s * 45)
-
-        while (attempts < MAX_ATTEMPTS) {
-            attempts++;
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
-            const statusResponse = await axios.get(statusUrl, {
-                headers: { 'Authorization': `Bearer ${API_KEY}` }
-            });
-
-            const statusData = statusResponse.data;
-            // The AI service returns status inside a 'data' object
-            const currentStatus = statusData.data?.status || 'UNKNOWN';
-            console.log(`🔄 [PUBLIC CHAT] Poll ${attempts}: ${currentStatus}`);
-
-            if (currentStatus === 'COMPLETED') {
-                // Task is done! Get the result.
-                const resultUrl = `${getAiBaseUrl()}/task/${taskId}/result`;
-                const resultResponse = await axios.get(resultUrl, {
-                    headers: { 'Authorization': `Bearer ${API_KEY}` }
-                });
-
-                // Result is also nested in data
-                result = normalizeResponse(resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data);
-                console.log('✅ [PUBLIC CHAT] Analysis Result Received:', JSON.stringify(result, null, 2));
-                break;
-            } else if (currentStatus === 'FAILED' || currentStatus === 'CANCELLED') {
-                throw new Error(`AI Task failed with status: ${currentStatus}`);
-            }
-        }
-
-        if (!result) {
-            throw new Error('AI analysis timed out');
-        }
-
-        // --- NEW: FETCH SUGGESTIONS ---
-        let suggested_queries = [];
-        if (areSuggestionsEnabled()) {
-            try {
-                const SUGGEST_API_URL = `${getAiBaseUrl()}/suggest-queries`;
-                const suggestPayload = {
-                    ...adjustedPayload,
-                    original_question: question,
-                    num_suggestions: 3
-                };
-                delete suggestPayload.question;
-                delete suggestPayload.response_format;
-                delete suggestPayload.max_rows;
-                delete suggestPayload.include_insights;
-                delete suggestPayload.include_visualizations;
-
-                const suggestResponse = await axios.post(SUGGEST_API_URL, suggestPayload, {
-                    headers: { 'Authorization': `Bearer ${API_KEY}` },
-                    timeout: 10000
-                });
-
-                // The AI service might return nested data or different keys
-                const respData = suggestResponse.data.data || suggestResponse.data;
-                const rawSuggestions = respData.suggestions || respData.suggested_queries || respData.suggested_questions || respData || [];
-
-                if (Array.isArray(rawSuggestions)) {
-                    suggested_queries = rawSuggestions.map(s => {
-                        if (typeof s === 'string') return s;
-                        if (typeof s === 'object') return s.question || s.text || s.query || '';
-                        return '';
-                    }).filter(s => s.length > 0);
-                }
-                console.log(`💡 [PUBLIC CHAT] Fetched ${suggested_queries.length} suggestions`);
-            } catch (e) {
-                console.error('⚠️ [PUBLIC CHAT] Failed to fetch suggestions:', e.message);
-                // Fallback suggestions based on context if possible, otherwise generic
-                suggested_queries = [
-                    "Show me the top 5 records",
-                    "Summarize this data for me",
-                    "Are there any notable trends?"
-                ];
-            }
-        }
-
-        // Attach suggestions to the result (normalize to both common names for parity)
-        if (result && typeof result === 'object') {
-            result.suggested_queries = suggested_queries;
-            result.suggested_questions = suggested_queries;
-        }
-
-        // 5. Finalize and Log
+        // 4. Finalize and Log
         await creditService.deductCredits(orgId, 1, { reference_type: 'public_chatbot', integration_id: integration.id });
         await db.query(`INSERT INTO integration_logs (integration_id, organization_id, endpoint, status, duration_ms, request_payload, response_payload) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
             [integration.id, orgId, '/api/public/chat', 'success', Date.now() - startedAt, JSON.stringify({ question }), JSON.stringify(result)]);

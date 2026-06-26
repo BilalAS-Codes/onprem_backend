@@ -3,9 +3,8 @@ const router = express.Router();
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-const XLSX = require('xlsx');
 const db = require('../config/database');
-const creditService = require('../services/creditService');
+const credireptService = require('../services/creditService');
 const whatsappService = require('../services/whatsappService');
 const { getAiBaseUrl, adjustPayload, normalizeResponse } = require('../helpers/aiHelper');
 const chartService = require('../services/chartService');
@@ -185,41 +184,6 @@ async function buildSemanticContext(conn, userContext = {}) {
     return { schemaInfo, allowedTables, disallowedTables, allowedColumns, restrictedColumns, relationships };
 }
 
-// Generate an Excel sheet from tabular query results
-function generateExcelReport(dataRows, columns, orgId) {
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(dataRows, { header: columns });
-    XLSX.utils.book_append_sheet(wb, ws, "Query Results");
-
-    const reportsDir = path.join(__dirname, '..', '..', 'public', 'reports');
-    if (!fs.existsSync(reportsDir)) {
-        fs.mkdirSync(reportsDir, { recursive: true });
-    }
-
-    const filename = `Report_${orgId}_${Date.now()}.xlsx`;
-    const filepath = path.join(reportsDir, filename);
-    XLSX.writeFile(wb, filepath);
-
-    return filename;
-}
-
-// Generate an Excel sheet from tabular query results
-function generateExcelReport(dataRows, columns, orgId) {
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(dataRows, { header: columns });
-    XLSX.utils.book_append_sheet(wb, ws, "Query Results");
-
-    const reportsDir = path.join(__dirname, '..', '..', 'public', 'reports');
-    if (!fs.existsSync(reportsDir)) {
-        fs.mkdirSync(reportsDir, { recursive: true });
-    }
-
-    const filename = `Report_${orgId}_${Date.now()}.xlsx`;
-    const filepath = path.join(reportsDir, filename);
-    XLSX.writeFile(wb, filepath);
-
-    return filename;
-}
 
 // --- GREETING DETECTION ---
 
@@ -602,33 +566,26 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             }
 
             const ctx = await buildSemanticContext(conn, userContext);
+
+            const access_policy = {
+                role: userContext.role.toLowerCase(),
+                allowed_tables: ctx.allowedTables,
+                disallowed_tables: ctx.disallowedTables,
+                allowed_columns: ctx.allowedColumns,
+                restricted_columns: ctx.restrictedColumns || {},
+                row_level_filters: {},
+                max_rows: 1000,
+                query_timeout_seconds: 30
+            };
+
             const payload = {
-                db_config: isFileSource ? {
-                    type: 'sheets',
-                    aws_paths: (await db.query('SELECT s3_key FROM file_sources WHERE organization_id = $1 AND status = $2', [orgId, 'active'])).rows.map(f => `s3://${process.env.AWS_S3_BUCKET || 'zeroqueries'}/${f.s3_key}`),
-                    load_all_sheets: true, schema_info: ctx.schemaInfo, relationships: ctx.relationships
-                } : {
-                    type: conn.db_type === 'postgresql' ? 'postgres' : conn.db_type,
-                    connection_string: constructConnectionString(conn),
-                    host: conn.host, port: parseInt(conn.port), database: conn.database_name, username: conn.username, password: conn.password,
-                    schema_info: ctx.schemaInfo, relationships: ctx.relationships
-                },
-                access_policy: {
-                    role: userContext.role.toLowerCase(),
-                    allowed_tables: ctx.allowedTables,
-                    disallowed_tables: ctx.disallowedTables,
-                    allowed_columns: ctx.allowedColumns,
-                    restricted_columns: ctx.restrictedColumns || {},
-                    row_level_filters: {},
-                    max_rows: 1000,
-                    query_timeout_seconds: 30
-                },
                 question: question,
-                response_format: 'general',
                 max_rows: 100,
-                locale: 'en',
                 include_insights: true,
-                include_visualizations: true
+                include_visualizations: true,
+                access_policy,
+                locale: 'en',
+                strict_joins: true
             };
 
             const adjustedPayload = adjustPayload(payload);
@@ -712,66 +669,21 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                 return; // Early return, skipping expensive AI processing and credit deduction!
             }
 
-            const ASYNC_API_URL = 'https://zeroqueries-9b4b6.ondigitalocean.app/api/v1/analyze-async';
+            // 6. CALL THE NEW AI MODEL /query ENDPOINT
+            const QUERY_API_URL = `${getAiBaseUrl()}/query`;
 
-            // Submit async parsing task to AI engine
-            const submitResponse = await axios.post(ASYNC_API_URL, payload, {
+            console.log(`📤 [WHATSAPP WEBHOOK] Sending query to AI engine: ${QUERY_API_URL}`);
+
+            const queryResponse = await axios.post(QUERY_API_URL, payload, {
                 headers: {
                     'accept': 'application/json',
                     'Authorization': `Bearer ${API_KEY}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 45000
+                timeout: 60000
             });
 
-            console.log('📤 [WHATSAPP WEBHOOK] AI submit task response:', JSON.stringify(submitResponse.data, null, 2));
-
-            const taskId = submitResponse.data.task_id;
-            if (!taskId) {
-                throw new Error('No task_id returned from AI service');
-            }
-
-            // 6. Polling loop
-            let result = null;
-            let attempts = 0;
-            const MAX_ATTEMPTS = 30; // 60 seconds total
-
-            while (attempts < MAX_ATTEMPTS) {
-                attempts++;
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                const statusUrl = `${getAiBaseUrl()}/task/${taskId}/status`;
-                const statusResponse = await axios.get(statusUrl, {
-                    headers: { 'Authorization': `Bearer ${API_KEY}` }
-                });
-
-                const currentStatus = statusResponse.data.data?.status || 'UNKNOWN';
-
-                if (currentStatus === 'COMPLETED') {
-                    const resultUrl = `${getAiBaseUrl()}/task/${taskId}/result`;
-                    const resultResponse = await axios.get(resultUrl, {
-                        headers: { 'Authorization': `Bearer ${API_KEY}` }
-                    });
-
-                    result = resultResponse.data.data?.result || resultResponse.data.data || resultResponse.data;
-                    console.log('📥 [WHATSAPP WEBHOOK] AI Result Payload received. Saving to zeroqueries-backend/whatsapp_payload.log for debugging...');
-                    try {
-                        fs.writeFileSync(
-                            path.join(__dirname, '../../whatsapp_payload.log'),
-                            JSON.stringify(result, null, 2)
-                        );
-                    } catch (fsErr) {
-                        console.error('⚠️ Failed to write debug payload file:', fsErr.message);
-                    }
-                    break;
-                } else if (currentStatus === 'FAILED' || currentStatus === 'CANCELLED') {
-                    throw new Error(`AI Task failed with status: ${currentStatus}`);
-                }
-            }
-
-            if (!result) {
-                throw new Error('AI analysis timed out');
-            }
+            const result = normalizeResponse(queryResponse.data);
 
             // Deduct credits on success
             await creditService.deductCredits(orgId, 1, { reference_type: 'whatsapp_bot', integration_id: integration.id });
@@ -823,7 +735,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     replyText += `${i + 1}. ${rowVals}\n`;
                 });
                 if (queryData.length > 5) {
-                    replyText += `_...and ${queryData.length - 5} more rows inside the attached Excel sheet._\n`;
+                    replyText += `_...and ${queryData.length - 5} more rows available._\n`;
                 }
             }
 
@@ -840,8 +752,7 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
             // 8. Deliver response — enforce WhatsApp's 4096 character hard limit
             const WA_MAX_CHARS = 4096;
             if (replyText.length > WA_MAX_CHARS) {
-                const truncateNote = `\n\n_...Message truncated. Full data is in the attached Excel report._`;
-                replyText = replyText.slice(0, WA_MAX_CHARS - truncateNote.length) + truncateNote;
+                replyText = replyText.slice(0, WA_MAX_CHARS - 40) + `\n\n_...Message truncated due to length._`;
             }
             await whatsappService.sendText(senderPhone, replyText, config);
 
@@ -855,25 +766,6 @@ router.post('/webhook', express.urlencoded({ extended: true }), async (req, res)
                     }
                 } catch (chartErr) {
                     console.error('⚠️ [WHATSAPP WEBHOOK] Failed to send chart image:', chartErr.message);
-                }
-            }
-
-            // --- EXCEL REPORT DELIVERY ---
-            if (Array.isArray(queryData) && queryData.length > 0 && Array.isArray(columns) && columns.length > 0) {
-                try {
-                    const excelFilename = generateExcelReport(queryData, columns, orgId);
-
-                    // Construct file URL
-                    const hostUrl = process.env.BASE_URL || `http://${req.get('host')}`;
-                    const fileUrl = `${hostUrl}/reports/${excelFilename}`;
-
-                    console.log(`📊 [WHATSAPP WEBHOOK] Sending report excel sheet URL: ${fileUrl}`);
-
-                    // Wait for file write and send attachment
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    await whatsappService.sendDocument(senderPhone, fileUrl, 'Query_Result_Report.xlsx', config);
-                } catch (excelErr) {
-                    console.error('⚠️ [WHATSAPP WEBHOOK] Failed to generate/send Excel report:', excelErr.message);
                 }
             }
 

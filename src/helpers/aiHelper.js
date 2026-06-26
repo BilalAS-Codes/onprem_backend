@@ -1,4 +1,10 @@
 const axios = require('axios');
+const crypto = require('crypto');
+
+const SECRET = process.env.HMAC_SECRET;
+const CLIENT_ID = "nfc";
+const timestamp = Math.floor(Date.now() / 1000).toString();
+
 
 // Safe boolean helper to trim whitespaces and quotes from env variables
 function getBoolEnv(envName, defaultValue = true) {
@@ -87,11 +93,21 @@ function writeAsyncDebugLog(label, data) {
     }
 }
 
+// Generate HMAC-SHA256 signature for outgoing payloads
+function generatePayloadSignature(payload, secret, clientId, timestamp, method, path) {
+    const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const message = `${method}\n${path}\n${body}\n${clientId}\n${timestamp}`;
+    // Use secret as UTF-8 string
+    const key = Buffer.from(secret.trim(), 'utf-8');
+    return crypto.createHmac('sha256', key).update(message, 'utf-8').digest('hex');
+}
+
 module.exports = {
     getAiBaseUrl,
     adjustPayload,
     areSuggestionsEnabled,
     getDisabledSuggestionsResponse,
     normalizeResponse,
-    writeAsyncDebugLog
+    writeAsyncDebugLog,
+    generatePayloadSignature
 };
