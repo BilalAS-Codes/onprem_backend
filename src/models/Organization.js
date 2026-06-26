@@ -2,22 +2,19 @@ const db = require('../config/database');
 
 const Organization = {
   async create(organizationData) {
-    const { name, domain, plan_id } = organizationData;
-    
+    const { name, domain } = organizationData;
+
     const result = await db.query(
-      'INSERT INTO organizations (name, domain, plan_id) VALUES ($1, $2, $3) RETURNING *',
-      [name, domain, plan_id]
+      'INSERT INTO organizations (name, domain, is_active) VALUES ($1, $2, true) RETURNING *',
+      [name, domain]
     );
-    
+
     return result.rows[0];
   },
 
   async findById(id) {
     const result = await db.query(
-      'SELECT o.*, p.name as plan_name, p.query_limit, p.user_limit, p.db_limit ' +
-      'FROM organizations o ' +
-      'LEFT JOIN plans p ON o.plan_id = p.id ' +
-      'WHERE o.id = $1',
+      'SELECT id, name, domain, is_active, created_at FROM organizations WHERE id = $1',
       [id]
     );
     return result.rows[0];
@@ -31,10 +28,11 @@ const Organization = {
     return result.rows[0];
   },
 
-  async updatePlan(organizationId, planId) {
+  async update(id, data) {
+    const { name, domain, is_active } = data;
     const result = await db.query(
-      'UPDATE organizations SET plan_id = $1 WHERE id = $2 RETURNING *',
-      [planId, organizationId]
+      'UPDATE organizations SET name = COALESCE($1, name), domain = COALESCE($2, domain), is_active = COALESCE($3, is_active) WHERE id = $4 RETURNING *',
+      [name, domain, is_active, id]
     );
     return result.rows[0];
   }

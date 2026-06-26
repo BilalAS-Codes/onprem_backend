@@ -89,3 +89,7 @@ docs/_build/
 scratch/
 fetch_real.js
 payload.json
+
+# Database scripts
+scripts/seed.sql
+scripts/create_schema.sql

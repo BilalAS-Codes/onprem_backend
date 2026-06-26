@@ -7,7 +7,7 @@ const organizationController = {
     try {
       // Note: Main organization creation is in authController.register
       // This endpoint is for creating additional organizations (if needed)
-      const { name, domain, plan_id } = req.body;
+      const { name, domain } = req.body;
       const userId = req.user.id;
 
       // Get current user to get organization info
@@ -22,11 +22,7 @@ const organizationController = {
         return res.status(400).json({ error: 'Organization domain already registered' });
       }
 
-      const organization = await Organization.create({
-        name,
-        domain,
-        plan_id
-      });
+      const organization = await Organization.create({ name, domain });
 
       res.status(201).json({
         success: true,
@@ -51,29 +47,21 @@ const organizationController = {
       // If user is admin, include more details
       if (req.user.role === 'Admin') {
         // Get user count
-        const userCount = await db.query( // Fixed: db is now defined
+        const userCount = await db.query(
           'SELECT COUNT(*) FROM users WHERE organization_id = $1 AND status = $2',
           [organizationId, 'active']
         );
 
-        // Get database connection count
-        const dbCount = await db.query(
-          'SELECT COUNT(*) FROM database_connections WHERE organization_id = $1',
-          [organizationId]
-        );
-
         // Get query count for current month
-        const currentMonth = new Date().toISOString().slice(0, 7);
         const queryCount = await db.query(
-          `SELECT COUNT(*) FROM query_history 
-           WHERE organization_id = $1 
+          `SELECT COUNT(*) FROM query_history
+           WHERE organization_id = $1
            AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE)`,
           [organizationId]
         );
 
         organization.stats = {
           user_count: parseInt(userCount.rows[0].count),
-          db_count: parseInt(dbCount.rows[0].count),
           monthly_queries: parseInt(queryCount.rows[0].count)
         };
       }

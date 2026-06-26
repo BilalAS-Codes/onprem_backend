@@ -1,155 +1,96 @@
 // controllers/adminDashboard.controller.js
 const db = require('../config/database');
-const { testConnection } = require('../utils/dbConnection');
-const { enrichPlanRecord, resolvePlanPrice } = require('../utils/planCatalog');
 
 class AdminDashboardController {
   async getDashboard(req, res) {
     try {
       const { range = 'month' } = req.query;
-      const organizationId = req.user.organization_id; // From auth middleware
+      const organizationId = req.user.organization_id;
 
-      // Fetch all dashboard data in parallel
       const [
         organization,
-        quotaSummary,
-        databaseConnection,
+        usageSummary,
         userMetrics,
         queryAnalytics,
         departmentPerformance,
-        billingInfo,
-        semanticLayer,
         recentActivities,
-        performanceMetrics,
-        alerts
+        performanceMetrics
       ] = await Promise.all([
         this.getOrganizationInfo(organizationId),
-        this.getQuotaSummary(organizationId, range),
-        this.getDatabaseConnection(organizationId),
+        this.getUsageSummary(organizationId, range),
         this.getUserMetrics(organizationId),
         this.getQueryAnalytics(organizationId, range),
         this.getDepartmentPerformance(organizationId),
-        this.getBillingInfo(organizationId),
-        this.getSemanticLayer(organizationId),
         this.getRecentActivities(organizationId),
-        this.getPerformanceMetrics(organizationId, range),
-        this.getAlerts(organizationId)
+        this.getPerformanceMetrics(organizationId, range)
       ]);
-
-      // Test database connection latency if connection exists
-      if (databaseConnection) {
-        const testResult = await testConnection({
-          db_type: databaseConnection.db_type,
-          host: databaseConnection.host,
-          port: databaseConnection.port,
-          database_name: databaseConnection.database_name,
-          username: databaseConnection.username,
-          password: databaseConnection.password,
-          ssl_enabled: databaseConnection.ssl_enabled
-        });
-
-        if (testResult.success) {
-          databaseConnection.latency_ms = testResult.latency_ms;
-        }
-      }
 
       res.json({
         organization,
-        quota_summary: quotaSummary,
-        database_connection: databaseConnection,
+        usage_summary: usageSummary,
         user_metrics: userMetrics,
         query_analytics: queryAnalytics,
         department_performance: departmentPerformance,
-        billing_info: billingInfo,
-        semantic_layer: semanticLayer,
         recent_activities: recentActivities,
-        performance_metrics: performanceMetrics,
-        alerts
+        performance_metrics: performanceMetrics
       });
 
     } catch (error) {
       console.error('Error in admin dashboard:', error);
-      res.status(500).json({
-        error: 'Failed to fetch dashboard data',
-        details: error.message
-      });
+      res.status(500).json({ error: 'Failed to fetch dashboard data', details: error.message });
     }
   }
 
   async getOrganizationInfo(organizationId) {
     const query = await db.query(
-      `SELECT o.id, o.name, o.domain, COALESCE(p.name, 'Free Trial') as plan_name, o.created_at, o.is_active
-       FROM organizations o
-       LEFT JOIN plans p ON o.plan_id = p.id
-       WHERE o.id = $1`,
+      `SELECT id, name, domain, is_active, created_at
+       FROM organizations
+       WHERE id = $1`,
       [organizationId]
     );
-    const row = query.rows[0];
-    if (!row) return row;
-    const enrichedPlan = enrichPlanRecord({ name: row.plan_name });
-    return {
-      ...row,
-      plan_name: enrichedPlan.name || row.plan_name
-    };
-  }
-
-  async getQuotaSummary(organizationId, range) {
-    const query = await db.query(
-      `WITH current_quota AS (
-         SELECT assigned_points_limit, assigned_queries_limit, 
-                remaining_points, remaining_queries, expiration_date
-         FROM organization_quota_assignments
-         WHERE organization_id = $1 AND is_active = true
-         ORDER BY effective_date DESC
-         LIMIT 1
-       )
-       SELECT 
-         cq.assigned_queries_limit as total_queries_limit,
-         GREATEST(cq.assigned_queries_limit - COALESCE(cq.remaining_queries, 0), 0) as queries_used,
-         cq.remaining_queries,
-         ROUND((GREATEST(cq.assigned_queries_limit - COALESCE(cq.remaining_queries, 0), 0)::numeric / NULLIF(cq.assigned_queries_limit, 0) * 100), 1) as queries_usage_percentage,
-         cq.assigned_points_limit as total_points_limit,
-         GREATEST(cq.assigned_points_limit - COALESCE(cq.remaining_points, 0), 0) as points_used,
-         cq.remaining_points,
-         ROUND((GREATEST(cq.assigned_points_limit - COALESCE(cq.remaining_points, 0), 0)::numeric / NULLIF(cq.assigned_points_limit, 0) * 100), 1) as points_usage_percentage,
-         cq.expiration_date as query_limit_reset_date,
-         0 as overage_charges
-       FROM current_quota cq`,
-      [organizationId]
-    );
-
-    return query.rows[0] || {
-      total_queries_limit: 0,
-      queries_used: 0,
-      remaining_queries: 0,
-      queries_usage_percentage: 0,
-      total_points_limit: 0,
-      points_used: 0,
-      remaining_points: 0,
-      points_usage_percentage: 0,
-      query_limit_reset_date: null,
-      overage_charges: 0
-    };
-  }
-
-  async getDatabaseConnection(organizationId) {
-    const query = await db.query(
-      `SELECT id, db_type, host, port, database_name, username, 
-              ssl_enabled, status, latency_ms, last_synced_at,
-              (SELECT COUNT(*) FROM semantic_tables WHERE connection_id = dc.id) as tables_count
-       FROM database_connections dc
-       WHERE organization_id = $1 AND status IN ('active', 'connected')
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [organizationId]
-    );
-
     return query.rows[0] || null;
+  }
+
+  async getUsageSummary(organizationId, range) {
+    const month = new Date().toISOString().slice(0, 7); // e.g. '2026-06'
+
+    // Try to get from usage_summary table first
+    const summary = await db.query(
+      `SELECT query_count, successful_queries, rejected_queries,
+              average_response_time, error_rate, month
+       FROM usage_summary
+       WHERE organization_id = $1 AND month = $2
+       LIMIT 1`,
+      [organizationId, month]
+    );
+
+    if (summary.rows.length > 0) {
+      return summary.rows[0];
+    }
+
+    // Fallback: compute live from query_history
+    const dateFilter = this.getDateFilter(range);
+    const live = await db.query(
+      `SELECT
+         COUNT(*) as query_count,
+         COUNT(CASE WHEN status = 'success' THEN 1 END) as successful_queries,
+         COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_queries,
+         ROUND(AVG(execution_time_ms)) as average_response_time,
+         ROUND((COUNT(CASE WHEN status = 'failed' THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100), 1) as error_rate
+       FROM query_history
+       WHERE organization_id = $1 ${dateFilter}`,
+      [organizationId]
+    );
+
+    return live.rows[0] || {
+      query_count: 0, successful_queries: 0, rejected_queries: 0,
+      average_response_time: 0, error_rate: 0, month
+    };
   }
 
   async getUserMetrics(organizationId) {
     const userStats = await db.query(
-      `SELECT 
+      `SELECT
          COUNT(*) as total_users,
          COUNT(CASE WHEN status = 'active' THEN 1 END) as active_users,
          COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_users
@@ -168,7 +109,7 @@ class AdminDashboardController {
     );
 
     const topUsers = await db.query(
-      `SELECT 
+      `SELECT
          u.id as user_id,
          u.full_name as user_name,
          u.email,
@@ -180,57 +121,38 @@ class AdminDashboardController {
        JOIN roles r ON u.role_id = r.id
        LEFT JOIN (
          SELECT
-           activity.user_id,
+           qh.user_id,
            COUNT(*) as query_count,
-           COUNT(CASE WHEN activity.is_success THEN 1 END) as success_count,
-           MAX(activity.created_at) as last_active
-         FROM (
-           SELECT
-             qh.user_id,
-             qh.created_at,
-             (qh.status = 'success') as is_success
-           FROM query_history qh
-           WHERE qh.organization_id = $1
-
-           UNION ALL
-
-           SELECT
-             aal.user_id,
-             aal.created_at,
-             COALESCE(aal.success, false) as is_success
-           FROM analysis_api_logs aal
-           WHERE aal.organization_id = $1
-             AND aal.user_id IS NOT NULL
-             AND aal.endpoint IN ('/api/v1/analyze', '/api/v1/analyze-async')
-         ) activity
-         GROUP BY activity.user_id
+           COUNT(CASE WHEN qh.status = 'success' THEN 1 END) as success_count,
+           MAX(qh.created_at) as last_active
+         FROM query_history qh
+         WHERE qh.organization_id = $1
+         GROUP BY qh.user_id
        ) activity ON u.id = activity.user_id
        WHERE u.organization_id = $1
-       GROUP BY u.id, u.full_name, u.email, r.name, activity.query_count, activity.success_count, activity.last_active
-       ORDER BY query_count DESC
+       ORDER BY COALESCE(activity.query_count, 0) DESC
        LIMIT 5`,
       [organizationId]
     );
 
     return {
-      total_users: parseInt(userStats.rows[0].total_users),
-      active_users: parseInt(userStats.rows[0].active_users),
+      total_users:    parseInt(userStats.rows[0].total_users),
+      active_users:   parseInt(userStats.rows[0].active_users),
       inactive_users: parseInt(userStats.rows[0].inactive_users),
-      users_by_role: usersByRole.rows,
-      top_users: topUsers.rows
+      users_by_role:  usersByRole.rows,
+      top_users:      topUsers.rows
     };
   }
 
   async getQueryAnalytics(organizationId, range) {
     const dateFilter = this.getDateFilter(range);
 
-    // Daily queries
     const dailyQueries = await db.query(
-      `SELECT 
+      `SELECT
          DATE(created_at) as date,
          COUNT(*) as total,
          COUNT(CASE WHEN status = 'success' THEN 1 END) as successful,
-         COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
+         COUNT(CASE WHEN status = 'failed'  THEN 1 END) as failed,
          ROUND(AVG(execution_time_ms)) as avg_execution_time
        FROM query_history
        WHERE organization_id = $1 ${dateFilter}
@@ -240,36 +162,34 @@ class AdminDashboardController {
       [organizationId]
     );
 
-    // Queries by status
     const queriesByStatus = await db.query(
-      `SELECT 
-         COUNT(CASE WHEN status = 'success' THEN 1 END) as successful,
-         COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed,
-         COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+      `SELECT
+         COUNT(CASE WHEN status = 'success'  THEN 1 END) as successful,
+         COUNT(CASE WHEN status = 'failed'   THEN 1 END) as failed,
+         COUNT(CASE WHEN status = 'pending'  THEN 1 END) as pending,
          COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected
        FROM query_history
        WHERE organization_id = $1 ${dateFilter}`,
       [organizationId]
     );
 
-    // Queries by department
     const queriesByDepartment = await db.query(
-      `SELECT 
+      `SELECT
          d.name as department,
          COUNT(qh.id) as count,
          ROUND((COUNT(CASE WHEN qh.status = 'success' THEN 1 END)::numeric / NULLIF(COUNT(qh.id), 0) * 100), 1) as success_rate
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id
-       LEFT JOIN query_history qh ON u.id = qh.user_id AND qh.created_at ${this.getDateFilterForJoin(range)}
+       LEFT JOIN query_history qh ON u.id = qh.user_id
+         AND qh.created_at ${this.getDateFilterForJoin(range)}
        WHERE d.organization_id = $1
        GROUP BY d.id, d.name
        ORDER BY count DESC`,
       [organizationId]
     );
 
-    // Popular questions
     const popularQuestions = await db.query(
-      `SELECT 
+      `SELECT
          question,
          COUNT(*) as frequency,
          ROUND(AVG(execution_time_ms)) as avg_execution_time,
@@ -283,212 +203,65 @@ class AdminDashboardController {
     );
 
     return {
-      daily_queries: dailyQueries.rows,
-      queries_by_status: queriesByStatus.rows[0] || { successful: 0, failed: 0, pending: 0, rejected: 0 },
+      daily_queries:         dailyQueries.rows,
+      queries_by_status:     queriesByStatus.rows[0] || { successful: 0, failed: 0, pending: 0, rejected: 0 },
       queries_by_department: queriesByDepartment.rows,
-      popular_questions: popularQuestions.rows
+      popular_questions:     popularQuestions.rows
     };
   }
 
   async getDepartmentPerformance(organizationId) {
     const query = await db.query(
-      `SELECT 
+      `SELECT
          d.id as department_id,
          d.name as department_name,
-         d.privacy_level,
          COUNT(DISTINCT u.id) as user_count,
          COUNT(qh.id) as query_count,
-         ROUND((COUNT(CASE WHEN qh.status = 'success' THEN 1 END)::numeric / NULLIF(COUNT(qh.id), 0) * 100), 1) as success_rate,
-         0::numeric as points_used
+         ROUND((COUNT(CASE WHEN qh.status = 'success' THEN 1 END)::numeric / NULLIF(COUNT(qh.id), 0) * 100), 1) as success_rate
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id
        LEFT JOIN query_history qh ON u.id = qh.user_id
        WHERE d.organization_id = $1
-       GROUP BY d.id, d.name, d.privacy_level
+       GROUP BY d.id, d.name
        ORDER BY query_count DESC`,
       [organizationId]
     );
-
     return query.rows;
-  }
-
-  async getBillingInfo(organizationId) {
-    // Get current plan
-    const currentPlan = await db.query(
-      `SELECT 
-         p.name,
-         COALESCE(p.price_monthly, 0) as price,
-         'monthly' as billing_cycle,
-         o.created_at + INTERVAL '1 month' as next_billing_date,
-         COALESCE(p.features, '{}'::json) as features
-       FROM organizations o
-       LEFT JOIN plans p ON o.plan_id = p.id
-       WHERE o.id = $1`,
-      [organizationId]
-    );
-
-    // Get recent invoices
-    const invoices = await db.query(
-      `SELECT 
-         id,
-         'INV-' || EXTRACT(YEAR FROM created_at) || '-' || LPAD(CAST(EXTRACT(MONTH FROM created_at) AS TEXT), 2, '0') as invoice_number,
-         amount,
-         CASE WHEN lower(status) IN ('paid', 'completed') THEN 'paid' ELSE lower(status) END as status,
-         TO_CHAR(created_at, 'Mon YYYY') as period,
-         created_at as issued_at,
-         CASE WHEN status = 'completed' THEN created_at ELSE NULL END as paid_at,
-         '/api/billing/invoices/' || id as download_url
-       FROM billing_transactions
-       WHERE organization_id = $1
-         AND lower(status) <> 'created'
-       ORDER BY created_at DESC
-       LIMIT 5`,
-      [organizationId]
-    );
-
-    // Get payment method (you might have a separate table for this)
-    const paymentMethod = await db.query(
-      `SELECT 
-         'card' as type,
-         '4242' as last4,
-         '05/25' as expiry_date,
-         true as is_default
-       FROM organizations
-       WHERE id = $1`,
-      [organizationId]
-    );
-
-    const currentPlanRow = currentPlan.rows[0] || null;
-    const enrichedCurrentPlan = currentPlanRow
-      ? enrichPlanRecord({
-        ...currentPlanRow,
-        name: currentPlanRow.name
-      })
-      : null;
-
-    return {
-      current_plan: enrichedCurrentPlan
-        ? {
-          ...currentPlanRow,
-          name: enrichedCurrentPlan.name,
-          price: resolvePlanPrice(enrichedCurrentPlan),
-          price_label: enrichedCurrentPlan.price_label || null,
-          price_label_ar: enrichedCurrentPlan.price_label_ar || null,
-          feature_list: enrichedCurrentPlan.feature_list || [],
-          feature_list_ar: enrichedCurrentPlan.feature_list_ar || []
-        }
-        : null,
-      invoices: invoices.rows,
-      payment_method: paymentMethod.rows[0] || { type: 'card', last4: '****', expiry_date: null, is_default: true }
-    };
-  }
-
-  async getSemanticLayer(organizationId) {
-    const stats = await db.query(
-      `SELECT 
-         (SELECT COUNT(*) FROM semantic_tables st 
-          JOIN database_connections dc ON st.connection_id = dc.id 
-          WHERE dc.organization_id = $1) as total_tables,
-         (SELECT COUNT(*) FROM semantic_columns sc 
-          JOIN semantic_tables st ON sc.semantic_table_id = st.id
-          JOIN database_connections dc ON st.connection_id = dc.id
-          WHERE dc.organization_id = $1) as total_columns,
-         (SELECT COUNT(*) FROM semantic_tables st 
-          JOIN database_connections dc ON st.connection_id = dc.id 
-          WHERE dc.organization_id = $1 AND st.is_enabled = true) as enabled_tables,
-         (SELECT COUNT(*) FROM semantic_columns sc 
-          JOIN semantic_tables st ON sc.semantic_table_id = st.id
-          JOIN database_connections dc ON st.connection_id = dc.id
-          WHERE dc.organization_id = $1 AND sc.is_enabled = true) as enabled_columns`,
-      [organizationId]
-    );
-
-    const recentUpdates = await db.query(
-      `(SELECT 
-          'table' as type,
-          st.id,
-          st.table_name as name,
-          st.business_name,
-          st.updated_at
-        FROM semantic_tables st
-        JOIN database_connections dc ON st.connection_id = dc.id
-        WHERE dc.organization_id = $1
-        ORDER BY st.updated_at DESC
-        LIMIT 3)
-       UNION ALL
-       (SELECT 
-          'column' as type,
-          sc.id,
-          sc.column_name as name,
-          sc.business_name,
-          sc.updated_at
-        FROM semantic_columns sc
-        JOIN semantic_tables st ON sc.semantic_table_id = st.id
-        JOIN database_connections dc ON st.connection_id = dc.id
-        WHERE dc.organization_id = $1
-        ORDER BY sc.updated_at DESC
-        LIMIT 3)
-       ORDER BY updated_at DESC
-       LIMIT 5`,
-      [organizationId]
-    );
-
-    return {
-      total_tables: parseInt(stats.rows[0].total_tables) || 0,
-      total_columns: parseInt(stats.rows[0].total_columns) || 0,
-      enabled_tables: parseInt(stats.rows[0].enabled_tables) || 0,
-      enabled_columns: parseInt(stats.rows[0].enabled_columns) || 0,
-      recent_updates: recentUpdates.rows
-    };
   }
 
   async getRecentActivities(organizationId) {
     const query = await db.query(
-      `(SELECT 
-          'query' as type,
-          qh.id,
-          u.full_name as user_name,
-          'Query Executed' as action,
-          qh.question as target,
-          CASE WHEN qh.status = 'success' THEN 'success' ELSE 'error' END as status,
-          qh.created_at
-        FROM query_history qh
-        JOIN users u ON qh.user_id = u.id
-        WHERE qh.organization_id = $1
-        ORDER BY qh.created_at DESC
-        LIMIT 3)
+      `(SELECT
+           'query' as type,
+           qh.id,
+           u.full_name as user_name,
+           'Query Executed' as action,
+           qh.question as target,
+           CASE WHEN qh.status = 'success' THEN 'success' ELSE 'error' END as status,
+           qh.created_at
+         FROM query_history qh
+         JOIN users u ON qh.user_id = u.id
+         WHERE qh.organization_id = $1
+         ORDER BY qh.created_at DESC
+         LIMIT 5)
        UNION ALL
-       (SELECT 
-          'audit' as type,
-          al.id,
-          u.full_name as user_name,
-          al.action,
-          al.target,
-          'success' as status,
-          al.created_at
-        FROM audit_logs al
-        JOIN users u ON al.user_id = u.id
-        WHERE al.organization_id = $1
-        ORDER BY al.created_at DESC
-        LIMIT 3)
-       UNION ALL
-       (SELECT 
-          'connection' as type,
-          dc.id,
-          'System' as user_name,
-          'Database ' || dc.status as action,
-          dc.database_name as target,
-          CASE WHEN dc.status = 'active' THEN 'success' ELSE 'warning' END as status,
-          dc.updated_at as created_at
-        FROM database_connections dc
-        WHERE dc.organization_id = $1 AND dc.updated_at > NOW() - INTERVAL '7 days'
-        ORDER BY dc.updated_at DESC
-        LIMIT 2)
+       (SELECT
+           'audit' as type,
+           al.id,
+           u.full_name as user_name,
+           al.action,
+           al.target,
+           'success' as status,
+           al.created_at
+         FROM audit_logs al
+         JOIN users u ON al.user_id = u.id
+         WHERE al.organization_id = $1
+         ORDER BY al.created_at DESC
+         LIMIT 3)
        ORDER BY created_at DESC
        LIMIT 8`,
       [organizationId]
     );
-
     return query.rows;
   }
 
@@ -496,135 +269,39 @@ class AdminDashboardController {
     const dateFilter = this.getDateFilter(range);
 
     const query = await db.query(
-      `SELECT 
+      `SELECT
          ROUND(AVG(execution_time_ms)) as avg_response_time,
          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY execution_time_ms) as p95_response_time,
          ROUND((COUNT(CASE WHEN status = 'failed' THEN 1 END)::numeric / NULLIF(COUNT(*), 0) * 100), 1) as error_rate,
-         COUNT(CASE WHEN execution_time_ms > 1000 THEN 1 END) as slow_queries,
-         ROUND(AVG(CASE WHEN qrc.id IS NOT NULL THEN 100 ELSE 0 END), 1) as cache_hit_rate
-       FROM query_history qh
-       LEFT JOIN query_results_cache qrc ON qh.id = qrc.query_id
-       WHERE qh.organization_id = $1 ${dateFilter}`,
+         COUNT(CASE WHEN execution_time_ms > 1000 THEN 1 END) as slow_queries
+       FROM query_history
+       WHERE organization_id = $1 ${dateFilter}`,
       [organizationId]
     );
 
     return {
-      avg_response_time: parseInt(query.rows[0].avg_response_time) || 0,
-      p95_response_time: parseInt(query.rows[0].p95_response_time) || 0,
-      error_rate: parseFloat(query.rows[0].error_rate) || 0,
-      slow_queries: parseInt(query.rows[0].slow_queries) || 0,
-      cache_hit_rate: parseFloat(query.rows[0].cache_hit_rate) || 0
+      avg_response_time: parseInt(query.rows[0].avg_response_time)  || 0,
+      p95_response_time: parseInt(query.rows[0].p95_response_time)  || 0,
+      error_rate:        parseFloat(query.rows[0].error_rate)        || 0,
+      slow_queries:      parseInt(query.rows[0].slow_queries)        || 0
     };
-  }
-
-  async getAlerts(organizationId) {
-    const alerts = [];
-
-    // Check quota usage
-    const quotaAlert = await db.query(
-      `SELECT 
-         remaining_queries,
-         assigned_queries_limit
-       FROM organization_quota_assignments
-       WHERE organization_id = $1 AND is_active = true
-       ORDER BY effective_date DESC
-       LIMIT 1`,
-      [organizationId]
-    );
-
-    if (quotaAlert.rows.length > 0) {
-      const remaining = quotaAlert.rows[0].remaining_queries;
-      const total = quotaAlert.rows[0].assigned_queries_limit;
-      const used = total - remaining;
-      const percentage = (used / total) * 100;
-
-      if (percentage > 90) {
-        alerts.push({
-          id: 'quota_critical',
-          type: 'error',
-          title: 'Critical: Query Limit Almost Reached',
-          description: `You have used ${percentage.toFixed(1)}% of your monthly query quota`,
-          timestamp: new Date().toISOString(),
-          actionable: true
-        });
-      } else if (percentage > 75) {
-        alerts.push({
-          id: 'quota_warning',
-          type: 'warning',
-          title: 'Query Limit Approaching',
-          description: `You have used ${percentage.toFixed(1)}% of your monthly query quota`,
-          timestamp: new Date().toISOString(),
-          actionable: true
-        });
-      }
-    }
-
-    // Check for failed database connections
-    const failedConnections = await db.query(
-      `SELECT COUNT(*) as count
-       FROM database_connections
-       WHERE organization_id = $1 AND status = 'error'`,
-      [organizationId]
-    );
-
-    if (parseInt(failedConnections.rows[0].count) > 0) {
-      alerts.push({
-        id: 'db_error',
-        type: 'error',
-        title: 'Database Connection Issues',
-        description: `${failedConnections.rows[0].count} database connection(s) are in error state`,
-        timestamp: new Date().toISOString(),
-        actionable: true
-      });
-    }
-
-    // Check for recent failed queries
-    const failedQueries = await db.query(
-      `SELECT COUNT(*) as count
-       FROM query_history
-       WHERE organization_id = $1 
-         AND status = 'failed' 
-         AND created_at > NOW() - INTERVAL '1 hour'`,
-      [organizationId]
-    );
-
-    if (parseInt(failedQueries.rows[0].count) > 10) {
-      alerts.push({
-        id: 'high_failure_rate',
-        type: 'warning',
-        title: 'High Query Failure Rate',
-        description: `${failedQueries.rows[0].count} queries failed in the last hour`,
-        timestamp: new Date().toISOString(),
-        actionable: true
-      });
-    }
-
-    return alerts;
   }
 
   getDateFilter(range) {
     switch (range) {
-      case 'week':
-        return `AND created_at >= NOW() - INTERVAL '7 days'`;
-      case 'month':
-        return `AND created_at >= DATE_TRUNC('month', NOW())`;
-      case 'quarter':
-        return `AND created_at >= DATE_TRUNC('quarter', NOW())`;
-      default:
-        return `AND created_at >= DATE_TRUNC('month', NOW())`;
+      case 'week':    return `AND created_at >= NOW() - INTERVAL '7 days'`;
+      case 'month':   return `AND created_at >= DATE_TRUNC('month', NOW())`;
+      case 'quarter': return `AND created_at >= DATE_TRUNC('quarter', NOW())`;
+      default:        return `AND created_at >= DATE_TRUNC('month', NOW())`;
     }
   }
 
   getDateFilterForJoin(range) {
     switch (range) {
-      case 'week':
-        return `>= NOW() - INTERVAL '7 days'`;
-      case 'month':
-        return `>= DATE_TRUNC('month', NOW())`;
-      case 'quarter':
-        return `>= DATE_TRUNC('quarter', NOW())`;
-      default:
-        return `>= DATE_TRUNC('month', NOW())`;
+      case 'week':    return `>= NOW() - INTERVAL '7 days'`;
+      case 'month':   return `>= DATE_TRUNC('month', NOW())`;
+      case 'quarter': return `>= DATE_TRUNC('quarter', NOW())`;
+      default:        return `>= DATE_TRUNC('month', NOW())`;
     }
   }
 }

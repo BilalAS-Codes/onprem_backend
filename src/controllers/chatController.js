@@ -4,91 +4,16 @@ const chatController = {
   // Create a new chat conversation
   async createConversation(req, res) {
     try {
-      const { title, connection_id } = req.body;
+      const { title } = req.body;
       const { organization_id, id: user_id } = req.user;
 
-      console.log('🆕 Creating conversation:', { title, connection_id, user_id, organization_id });
-
-      // 🆕 Handle virtual multi-file source (Special case for Excel aggregate mode)
-      if (connection_id === 'multi-file-source') {
-        const fileCheck = await db.query(
-          "SELECT COUNT(*) FROM file_sources WHERE organization_id = $1 AND status = 'active'",
-          [organization_id]
-        );
-
-        if (parseInt(fileCheck.rows[0].count) === 0) {
-          return res.status(400).json({
-            error: 'No active file sources found. Please upload and activate files before starting chat.',
-            code: 'no_active_files'
-          });
-        }
-
-        const result = await db.query(
-          `INSERT INTO chat_conversations (organization_id, user_id, connection_id, file_source_id, title)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING *`,
-          [organization_id, user_id, null, null, title || 'New Chat']
-        );
-
-        console.log('✅ Multi-file conversation created:', result.rows[0].id);
-        return res.status(201).json({
-          success: true,
-          conversation: result.rows[0]
-        });
-      }
-
-      // Require an active database connection before starting chat
-      let connectionResult = connection_id
-        ? await db.query(
-          `SELECT id FROM database_connections WHERE organization_id = $1 AND id = $2 AND status = 'connected' LIMIT 1`,
-          [organization_id, connection_id]
-        )
-        : await db.query(
-          `SELECT id FROM database_connections WHERE organization_id = $1 AND status = 'connected' LIMIT 1`,
-          [organization_id]
-        );
-
-      if (!connectionResult.rows.length) {
-          // Check file sources if no DB connection found
-          connectionResult = (connection_id && connection_id !== 'multi-file-source')
-            ? await db.query(
-              `SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2 AND status = 'active' LIMIT 1`,
-              [connection_id, organization_id]
-            )
-            : await db.query(
-              `SELECT id FROM file_sources WHERE organization_id = $1 AND status = 'active' LIMIT 1`,
-              [organization_id]
-            );
-      }
-
-      if (!connectionResult.rows.length) {
-        return res.status(400).json({
-          error: 'Database connection not found. Please connect a database before starting chat.',
-          code: 'db_not_connected'
-        });
-      }
-
-      // Check if connection_id belongs to a file source
-      const fileSourceCheck = (connection_id && connection_id !== 'multi-file-source') 
-        ? await db.query(
-            "SELECT id FROM file_sources WHERE id = $1 AND organization_id = $2 LIMIT 1",
-            [connection_id, organization_id]
-          )
-        : { rows: [] };
-
-      const isFileSource = fileSourceCheck.rows.length > 0;
+      console.log('🆕 Creating conversation:', { title, user_id, organization_id });
 
       const result = await db.query(
-        `INSERT INTO chat_conversations (organization_id, user_id, connection_id, file_source_id, title)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO chat_conversations (organization_id, user_id, title)
+         VALUES ($1, $2, $3)
          RETURNING *`,
-        [
-          organization_id, 
-          user_id, 
-          isFileSource ? null : (connection_id || null),
-          isFileSource ? connection_id : null,
-          title || 'New Chat'
-        ]
+        [organization_id, user_id, title || 'New Chat']
       );
 
       console.log('✅ Conversation created:', result.rows[0].id);
@@ -148,7 +73,6 @@ const chatController = {
 
       console.log('📖 Getting conversation:', { id, user_id, organization_id });
 
-      // Verify conversation belongs to user
       const convCheck = await db.query(
         `SELECT * FROM chat_conversations
          WHERE id = $1 AND organization_id = $2 AND user_id = $3`,
@@ -160,7 +84,6 @@ const chatController = {
         return res.status(404).json({ error: 'Conversation not found' });
       }
 
-      // Get all messages
       const messagesResult = await db.query(
         `SELECT * FROM chat_messages
          WHERE conversation_id = $1
@@ -184,19 +107,11 @@ const chatController = {
   async addMessage(req, res) {
     try {
       const { conversation_id } = req.params;
-      const { 
-        role, 
-        content, 
-        analysis_data, 
-        suggestions, 
-        is_error = false, 
-        error_message 
-      } = req.body;
+      const { role, content, analysis_data, is_error = false } = req.body;
       const { organization_id, id: user_id } = req.user;
 
       console.log('📥 Adding message to conversation:', conversation_id);
 
-      // Verify conversation exists and belongs to user
       const convCheck = await db.query(
         `SELECT * FROM chat_conversations
          WHERE id = $1 AND organization_id = $2 AND user_id = $3`,
@@ -209,24 +124,23 @@ const chatController = {
       }
 
       const normalizedAnalysisData = analysis_data ? JSON.stringify(analysis_data) : null;
-      const normalizedSuggestions = suggestions ? JSON.stringify(suggestions) : null;
 
+      // Dedup check — last 10 messages
       const latestMessageResult = await db.query(
-        `SELECT *
-         FROM chat_messages
+        `SELECT * FROM chat_messages
          WHERE conversation_id = $1
          ORDER BY created_at DESC, id DESC
          LIMIT 10`,
         [conversation_id]
       );
 
-      const duplicateMessage = latestMessageResult.rows.find((existingMessage) =>
-        existingMessage.role === role &&
-        String(existingMessage.content || '') === String(content || '') &&
-        JSON.stringify(existingMessage.analysis_data || null) === JSON.stringify(analysis_data || null) &&
-        JSON.stringify(existingMessage.suggestions || null) === JSON.stringify(suggestions || null) &&
-        Boolean(existingMessage.is_error) === Boolean(is_error)
+      const duplicateMessage = latestMessageResult.rows.find((m) =>
+        m.role === role &&
+        String(m.content || '') === String(content || '') &&
+        JSON.stringify(m.analysis_data || null) === JSON.stringify(analysis_data || null) &&
+        Boolean(m.is_error) === Boolean(is_error)
       );
+
       if (duplicateMessage) {
         return res.status(200).json({
           success: true,
@@ -235,33 +149,19 @@ const chatController = {
         });
       }
 
-      // Insert message
       const messageResult = await db.query(
-        `INSERT INTO chat_messages (
-          conversation_id, role, content, analysis_data, suggestions, 
-          is_error, error_message
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING *`,
-        [
-          conversation_id,
-          role,
-          content,
-          normalizedAnalysisData,
-          normalizedSuggestions,
-          is_error,
-          error_message
-        ]
+        `INSERT INTO chat_messages (conversation_id, role, content, analysis_data, is_error)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [conversation_id, role, content, normalizedAnalysisData, is_error]
       );
 
-      // Update conversation's last_message_at
       await db.query(
-        `UPDATE chat_conversations 
+        `UPDATE chat_conversations
          SET updated_at = CURRENT_TIMESTAMP, last_message_at = CURRENT_TIMESTAMP
          WHERE id = $1`,
         [conversation_id]
       );
-
-      // return inserted row
 
       console.log('✅ Message saved:', messageResult.rows[0].id);
       res.status(201).json({
@@ -274,14 +174,13 @@ const chatController = {
     }
   },
 
-  // Update a message (e.g. replace placeholder with final analysis)
+  // Update a message
   async updateMessage(req, res) {
     try {
       const { conversation_id, message_id } = req.params;
-      const { content, analysis_data, suggestions, is_error, error_message } = req.body;
+      const { content, analysis_data, is_error } = req.body;
       const { organization_id, id: user_id } = req.user;
 
-      // ensure conversation belongs to user
       const convCheck = await db.query(
         `SELECT * FROM chat_conversations
          WHERE id = $1 AND organization_id = $2 AND user_id = $3`,
@@ -293,19 +192,15 @@ const chatController = {
 
       const updateResult = await db.query(
         `UPDATE chat_messages
-         SET content = COALESCE($1, content),
+         SET content     = COALESCE($1, content),
              analysis_data = COALESCE($2, analysis_data),
-             suggestions = COALESCE($3, suggestions),
-             is_error = COALESCE($4, is_error),
-             error_message = COALESCE($5, error_message)
-         WHERE id = $6 AND conversation_id = $7
+             is_error    = COALESCE($3, is_error)
+         WHERE id = $4 AND conversation_id = $5
          RETURNING *`,
         [
           content,
           analysis_data ? JSON.stringify(analysis_data) : null,
-          suggestions ? JSON.stringify(suggestions) : null,
           is_error,
-          error_message,
           message_id,
           conversation_id
         ]
@@ -331,7 +226,6 @@ const chatController = {
 
       console.log('📨 Fetching messages:', { conversation_id, limit, offset });
 
-      // Verify conversation exists and belongs to user
       const convCheck = await db.query(
         `SELECT * FROM chat_conversations
          WHERE id = $1 AND organization_id = $2 AND user_id = $3`,

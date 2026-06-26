@@ -2,13 +2,13 @@ const db = require('../config/database');
 
 const Department = {
   async create(departmentData) {
-    const { organization_id, name, privacy_level = 'private' } = departmentData;
-    
+    const { organization_id, name } = departmentData;
+
     const result = await db.query(
-      'INSERT INTO departments (organization_id, name, privacy_level) VALUES ($1, $2, $3) RETURNING *',
-      [organization_id, name, privacy_level]
+      'INSERT INTO departments (organization_id, name) VALUES ($1, $2) RETURNING *',
+      [organization_id, name]
     );
-    
+
     return result.rows[0];
   },
 
@@ -25,64 +25,16 @@ const Department = {
     return result.rows[0];
   },
 
-  async findByOrganization(organizationId, sourceType) {
-    let joinCondition = `(
-         st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id) OR
-         st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)
-       )`;
-    const params = [organizationId];
-       
-    if (sourceType === 'excel') {
-      joinCondition = `st.file_source_id IN (SELECT id FROM file_sources WHERE organization_id = d.organization_id)`;
-    } else if (sourceType && sourceType !== 'all') {
-      // For any database type (postgresql, mysql, oracle, snowflake, bigquery), filter by connection_id and db_type
-      joinCondition = `st.connection_id IN (SELECT id FROM database_connections WHERE organization_id = d.organization_id AND db_type = $2)`;
-      params.push(sourceType);
-    }
-
+  async findByOrganization(organizationId) {
     const result = await db.query(
       `SELECT d.*,
-              COUNT(DISTINCT u.id) as user_count,
-              COUNT(DISTINCT CASE
-                WHEN st.is_enabled = true
-                  AND sc.is_enabled = true
-                  AND (
-                    COALESCE(sc.department_access, 'all') = 'all'
-                    OR (
-                      LEFT(TRIM(COALESCE(sc.department_access, '')), 1) = '['
-                      AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements_text(sc.department_access::jsonb) AS dept_access(value)
-                        WHERE dept_access.value = d.id::text
-                      )
-                    )
-                  )
-                THEN st.table_name
-              END) as tables_count,
-              STRING_AGG(DISTINCT CASE
-                WHEN st.is_enabled = true
-                  AND sc.is_enabled = true
-                  AND (
-                    COALESCE(sc.department_access, 'all') = 'all'
-                    OR (
-                      LEFT(TRIM(COALESCE(sc.department_access, '')), 1) = '['
-                      AND EXISTS (
-                        SELECT 1
-                        FROM jsonb_array_elements_text(sc.department_access::jsonb) AS dept_access(value)
-                        WHERE dept_access.value = d.id::text
-                      )
-                    )
-                  )
-                THEN st.table_name
-              END, ', ') as accessible_tables
+              COUNT(DISTINCT u.id) as user_count
        FROM departments d
        LEFT JOIN users u ON d.id = u.department_id AND u.status = 'active'
-       LEFT JOIN semantic_tables st ON ${joinCondition}
-       LEFT JOIN semantic_columns sc ON sc.semantic_table_id = st.id
        WHERE d.organization_id = $1
        GROUP BY d.id
        ORDER BY d.created_at DESC`,
-      params
+      [organizationId]
     );
     return result.rows;
   },
@@ -100,7 +52,7 @@ const Department = {
 
     values.push(id);
     const query = `UPDATE departments SET ${fields.join(', ')} WHERE id = $${paramCount} RETURNING *`;
-    
+
     const result = await db.query(query, values);
     return result.rows[0];
   },
@@ -111,32 +63,6 @@ const Department = {
       [id, organizationId]
     );
     return result.rows[0];
-  },
-
-  async setPermissions(departmentId, permissions) {
-    // Delete existing permissions
-    await db.query(
-      'DELETE FROM department_permissions WHERE department_id = $1',
-      [departmentId]
-    );
-
-    // Insert new permissions
-    for (const permission of permissions) {
-      await db.query(
-        'INSERT INTO department_permissions (department_id, table_name, access_level) VALUES ($1, $2, $3)',
-        [departmentId, permission.table_name, permission.access_level]
-      );
-    }
-
-    return this.getPermissions(departmentId);
-  },
-
-  async getPermissions(departmentId) {
-    const result = await db.query(
-      'SELECT * FROM department_permissions WHERE department_id = $1 ORDER BY table_name',
-      [departmentId]
-    );
-    return result.rows;
   }
 };
 
